@@ -1,35 +1,18 @@
 #!/usr/bin/env python3
-"""Diagnose NTP/chrony health and packet loss across a fleet.
+"""NTP/chrony health and packet loss across a fleet.
 
-Clock skew is the failure that presents as something else entirely: Ceph
-flapping OSDs, Kubernetes certificates rejected as not-yet-valid, Keystone
-tokens refused, Galera nodes evicted, and log timelines that make an incident
-impossible to reconstruct. By the time anyone suspects NTP, hours are gone.
+Clock skew shows up as something else first: Ceph flapping OSDs, Kubernetes
+certificates rejected as not yet valid, Galera evicting a node, log timelines
+that cannot be reconstructed. By the time anyone suspects NTP the incident is
+hours old.
 
-What this checks, per host:
+The useful signal is chrony's reachability register, which catches a firewall
+dropping UDP/123 intermittently. Also checks stratum, offset, jitter, source
+redundancy, and cross-host skew, which is the number that actually matters for
+a cluster.
 
-    sync        chrony/ntpd is actually synchronised, not merely running
-    offset      current offset against the reference, and the trend
-    stratum     stratum depth, and that the host is not following an
-                unsynchronised peer (stratum 16) or itself (LOCAL/orphan mode)
-    loss        packet loss and unreachability toward each configured source,
-                read from chrony's own reachability register — the check that
-                catches a firewall dropping UDP/123 intermittently, which is the
-                hardest NTP failure to see
-    jitter      RMS jitter and root dispersion, which reveal a congested or
-                asymmetric path even when the offset looks fine
-    sources     enough reachable sources to survive one going away, and no
-                single point of failure
-    consistency cross-host skew — the number that actually matters for a
-                distributed system is how far apart two nodes are
-
-Read-only: it never restarts a time service or steps a clock.
-
-Examples
---------
     ./ntp_health_check.py --hosts compute-01,compute-02,ctrl-01
-    ./ntp_health_check.py --inventory hosts.ini --format json
-    ./ntp_health_check.py --inventory hosts.ini --max-offset-ms 50 --fail-on-findings
+    ./ntp_health_check.py --inventory hosts.ini --max-offset-ms 50
 """
 
 from __future__ import annotations
@@ -169,7 +152,7 @@ def check_host(host: str, user: str, max_offset_ms: float, min_sources: int) -> 
         if rc_ntp == 0 and ntp_out.strip():
             return check_ntpd(host, ntp_out, max_offset_ms, min_sources)
         return [finding("CRITICAL", host, "sync", "service",
-                        "neither chronyc nor ntpq responded — no time service, or "
+                        "neither chronyc nor ntpq responded, no time service, or "
                         "the host is unreachable")]
 
     tracking = parse_tracking(tracking_out)
@@ -177,15 +160,15 @@ def check_host(host: str, user: str, max_offset_ms: float, min_sources: int) -> 
     # Stratum 16 means "I am not synchronised to anything".
     if tracking["stratum"] >= 16:
         rows.append(finding("CRITICAL", host, "sync", "stratum",
-                            "stratum 16 — the host is not synchronised to any source"))
+                            "stratum 16; the host is not synchronised to any source"))
     elif tracking["stratum"] >= 5:
         rows.append(finding("WARN", host, "sync", "stratum",
-                            f"stratum {tracking['stratum']} — unusually deep in the "
+                            f"stratum {tracking['stratum']}, unusually deep in the "
                             "hierarchy; check the upstream chain"))
 
     if tracking["reference"].upper().startswith(("7F7F", "LOCAL")):
         rows.append(finding("CRITICAL", host, "sync", "reference",
-                            "synchronised to its own local clock — this host will drift "
+                            "synchronised to its own local clock; this host will drift "
                             "freely and pull others with it"))
 
     if tracking["leap"] and tracking["leap"].lower() not in ("normal", "unknown"):
@@ -208,16 +191,16 @@ def check_host(host: str, user: str, max_offset_ms: float, min_sources: int) -> 
     dispersion = tracking["root_dispersion_s"]
     if dispersion is not None and dispersion > 1.0:
         rows.append(finding("WARN", host, "jitter", "root dispersion",
-                            f"{dispersion * 1000:.0f} ms — the path to the reference is "
+                            f"{dispersion * 1000:.0f} ms; the path to the reference is "
                             "congested or asymmetric"))
 
     skew = tracking["skew_ppm"]
     if skew is not None and skew > 100:
         rows.append(finding("WARN", host, "jitter", "skew",
-                            f"{skew:.0f} ppm frequency skew — likely a failing oscillator "
+                            f"{skew:.0f} ppm frequency skew, likely a failing oscillator "
                             "or an unstable virtualised clock source"))
 
-    # Sources and packet loss — the reachability register is the key signal.
+    # Sources and packet loss; the reachability register is the key signal.
     rc, sources_out = ssh(host, "chronyc -n sources 2>/dev/null", user)
     if rc == 0:
         sources = parse_sources(sources_out)
@@ -239,7 +222,7 @@ def check_host(host: str, user: str, max_offset_ms: float, min_sources: int) -> 
         for source in sources:
             if source["reach"] == 0:
                 rows.append(finding("CRITICAL", host, "loss", source["address"],
-                                    "completely unreachable (reach 0) — check UDP/123 "
+                                    "completely unreachable (reach 0), check UDP/123 "
                                     "filtering on the path"))
             elif source["reach"] != REACHABILITY_PERFECT:
                 # Count the missing polls out of the last eight.
@@ -247,12 +230,12 @@ def check_host(host: str, user: str, max_offset_ms: float, min_sources: int) -> 
                 rows.append(finding(
                     "CRITICAL" if missed >= 4 else "WARN",
                     host, "loss", source["address"],
-                    f"{missed} of the last 8 polls lost (reach {source['reach_octal']}) — "
+                    f"{missed} of the last 8 polls lost (reach {source['reach_octal']}), "
                     "intermittent packet loss toward this source",
                 ))
             elif source["state"] == "x":
                 rows.append(finding("WARN", host, "sources", source["address"],
-                                    "marked a falseticker — it disagrees with the majority"))
+                                    "marked a falseticker; it disagrees with the majority"))
             elif source["state"] == "~":
                 rows.append(finding("WARN", host, "sources", source["address"],
                                     "too variable to be used"))
@@ -316,7 +299,7 @@ def cross_host_consistency(host_offsets: dict[str, float], max_skew_ms: float) -
         worst_low = min(host_offsets, key=host_offsets.get)
         worst_high = max(host_offsets, key=host_offsets.get)
         return [finding("CRITICAL", "fleet", "consistency", "cross-host skew",
-                        f"{spread_ms:.1f} ms between {worst_low} and {worst_high} — "
+                        f"{spread_ms:.1f} ms between {worst_low} and {worst_high}, "
                         "Ceph, Galera and Kubernetes certificate validation all break "
                         "well before this becomes visible elsewhere")]
     return [finding("INFO", "fleet", "consistency", "cross-host skew",

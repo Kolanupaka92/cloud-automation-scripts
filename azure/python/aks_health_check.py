@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
-"""Fleet-wide health and upgrade-readiness report for AKS clusters.
+"""AKS fleet health and upgrade readiness.
 
-Checks each cluster for the things that cause a bad night:
+Version skew against the two-minor kubelet rule, available upgrades, node pool
+state, autoscaler bounds, zone spread, Spot backing a System pool, RBAC,
+network policy, and a public API server with no authorized IP ranges.
 
-    version        cluster and node pools on a supported version, control plane
-                   and node pools not skewed, an upgrade actually available
-    node-pools     autoscaler bounds, node count vs max pods, spot pools in
-                   system mode, pools not in a Succeeded state
-    resilience     multi-zone spread, availability of a system pool, minimum
-                   node counts that survive a single-zone loss
-    config         RBAC enabled, network policy set, private cluster, managed
-                   identity rather than a service principal, Azure Monitor and
-                   Defender add-ons enabled
-
-Examples
---------
     ./aks_health_check.py --all-subscriptions
     ./aks_health_check.py --cluster prod-aks-eastus --format json
-    ./aks_health_check.py --min-severity FAIL --fail-on-findings
 """
 
 from __future__ import annotations
@@ -157,7 +146,7 @@ def check_config(cluster, rg, sub, args) -> list[dict]:
     network = cluster.network_profile
     if network and not network.network_policy:
         rows.append(finding("WARN", name, "config", "network-policy",
-                            "no network policy engine — pod-to-pod traffic is unrestricted",
+                            "no network policy engine, pod-to-pod traffic is unrestricted",
                             rg, sub))
 
     api = cluster.api_server_access_profile

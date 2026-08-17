@@ -13,7 +13,7 @@
 #   1. Pre-flight   BMM fleet health, disk/network audit, Kubernetes health, and
 #                   an explicit GO/NO-GO on rack headroom. Any NO-GO stops here.
 #   2. Snapshot     Record the pre-maintenance state so the post-check can prove
-#                   nothing regressed rather than merely looking green.
+#                   nothing regressed, instead of just looking green.
 #   3. Shutdown     Cordon + power off, one machine at a time, journalled.
 #   4. Restore      Power on, wait Ready, uncordon, verify.
 #   5. Post-flight  Re-run every check and diff against the snapshot.
@@ -53,7 +53,7 @@
         state: directory
         mode: "0750"
 
-    - name: Pre-flight — bare metal fleet health and maintenance readiness
+    - name: Pre-flight, bare metal fleet health and maintenance readiness
       ansible.builtin.command:
         argv:
           - python3
@@ -80,7 +80,7 @@
         success_msg: "GO: rack {{ rack }} is ready for maintenance."
       when: phase in ['full', 'shutdown']
 
-    - name: Pre-flight — disk and network audit
+    - name: Pre-flight, disk and network audit
       ansible.builtin.command:
         argv:
           - python3
@@ -98,11 +98,11 @@
       ansible.builtin.debug:
         msg: >-
           {{ (preflight_audit.stdout | from_json | default([])) | length }}
-          pre-existing hardware finding(s) — these are expected to still be
+          pre-existing hardware finding(s); these are expected to still be
           present afterwards and must not be mistaken for maintenance damage.
       when: preflight_audit.stdout | default('') | length > 0
 
-    - name: Pre-flight — Kubernetes health
+    - name: Pre-flight, Kubernetes health
       ansible.builtin.include_tasks: tasks/k8s_snapshot.yml
       vars:
         snapshot_label: pre
@@ -147,7 +147,7 @@
         var: maintenance.stdout_lines
 
     # ---------------------------------------------------------------- stage 5
-    - name: Post-flight — bare metal fleet health
+    - name: Post-flight, bare metal fleet health
       ansible.builtin.command:
         argv:
           - python3
@@ -161,7 +161,7 @@
       check_mode: false
       when: phase in ['full', 'restore']
 
-    - name: Post-flight — disk and network audit
+    - name: Post-flight, disk and network audit
       ansible.builtin.command:
         argv:
           - python3
@@ -176,7 +176,7 @@
       check_mode: false
       when: phase in ['full', 'restore']
 
-    - name: Post-flight — Kubernetes health
+    - name: Post-flight, Kubernetes health
       ansible.builtin.include_tasks: tasks/k8s_snapshot.yml
       vars:
         snapshot_label: post
@@ -216,7 +216,7 @@
           - (new_hardware_findings | default([])) | length == 0
           - (new_k8s_findings | default([])) | length == 0
         fail_msg: >-
-          Maintenance on rack {{ rack }} introduced new findings —
+          Maintenance on rack {{ rack }} introduced new findings:
           {{ (new_hardware_findings | default([])) | length }} hardware,
           {{ (new_k8s_findings | default([])) | length }} Kubernetes.
           See {{ report_dir }}/{{ change_id }}-{{ rack }}-post.json

@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
-"""Audit Azure network security groups for internet-exposed administrative ports.
+"""Audit NSGs for internet-exposed admin ports.
 
-Effective rules matter more than authored ones, so where the credential has
-permission the script pulls the *effective* NSG rules for each NIC — the merged
-result of subnet-level and NIC-level groups, which is what traffic actually
-hits. It falls back to authored rules when effective rules are unavailable.
+With --effective it resolves the merged subnet + NIC rules where the
+credential is allowed to, since authored rules are not necessarily what
+traffic hits. Falls back to authored rules otherwise.
 
-Severity model:
-
-    CRITICAL  Allow from Internet/Any to an admin port (SSH, RDP, WinRM, SQL,
-              Redis, Mongo, Elasticsearch, Kubernetes API, ...)
-    HIGH      Allow from Internet/Any to any port, or a rule allowing all ports
-    MEDIUM    Allow from a very wide private range to an admin port
-    INFO      NSG attached to nothing, or with no custom rules
-
-Examples
---------
-    ./nsg_audit.py --all-subscriptions --min-severity HIGH
-    ./nsg_audit.py --resource-group prod-network --format json
-    ./nsg_audit.py --fail-on-findings   # CI gate
+CRITICAL is an Allow from Internet/Any to an admin port or to everything;
+HIGH is any other internet-facing Allow; MEDIUM is a very wide private source
+reaching an admin port.
 """
 
 from __future__ import annotations
@@ -160,7 +149,9 @@ def rules_for(client, nsg, use_effective: bool) -> list:
         if merged:
             LOG.debug("using effective rules for %s (%d)", nsg.name, len(merged))
             return merged
-    except Exception as exc:  # noqa: BLE001 - needs a running VM and extra rights
+    except Exception as exc:  # noqa: BLE001
+        # Needs a running VM on the NIC plus extra rights, so this falls back
+        # more often than not. Worth trying anyway when it does work.
         LOG.debug("effective rules unavailable for %s: %s", nsg.name, exc)
     return list(nsg.security_rules or [])
 

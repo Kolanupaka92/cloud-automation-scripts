@@ -1,31 +1,19 @@
 #!/usr/bin/env python3
-"""Quarterly maintenance driver for Operator Nexus bare metal machines.
+"""Quarterly maintenance driver for Nexus bare metal machines.
 
-Automates the loop that is otherwise done by hand, one machine at a time, for
-hours: cordon, power off, wait for the hardware work, power back on, wait for
-the machine to rejoin as Ready, uncordon, verify.
+cordon -> power off -> (hardware work) -> power on -> wait Ready -> uncordon
+-> verify. One machine at a time, journalled after every step so an
+interrupted window resumes with --resume rather than starting again.
 
     ./nexus_bmm_maintenance.py --rack rack-03 --change CHG0041827 --dry-run
-    ./nexus_bmm_maintenance.py --machine bmm-r03-s04 --change CHG0041827
     ./nexus_bmm_maintenance.py --rack rack-03 --change CHG0041827 --phase shutdown
     ./nexus_bmm_maintenance.py --rack rack-03 --change CHG0041827 --phase restore
-    ./nexus_bmm_maintenance.py --resume state/CHG0041827.json
 
-Safety properties that make this runnable in a production window:
+Rack headroom is re-checked immediately before every power-off, not just once
+at the start. --phase shutdown/restore splits the run around the hardware
+team's window.
 
-  * One machine at a time. A rack is never drained below --min-healthy-per-rack,
-    checked again immediately before every single power-off.
-  * Cordon evacuates tenant workloads first (``--no-evacuate`` opts out for
-    machines with no tenant VMs).
-  * Every state transition is polled to completion with a timeout; the script
-    never assumes an operation landed.
-  * Progress is journalled to a state file after every step, so an interrupted
-    window resumes with --resume instead of restarting.
-  * --phase shutdown / restore splits the run across a hardware team's window:
-    take the machines down, hand over, bring them back later.
-
-Nothing here replaces a BMM (``begin_replace``) or reimages anything — those are
-deliberately out of scope for an automated loop.
+Does not replace or reimage a machine. Those stay manual.
 """
 
 from __future__ import annotations

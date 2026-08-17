@@ -4,7 +4,7 @@
 #
 #   ansible-playbook config_drift_detect.yml --tags record
 #
-# and commit the diff — the git history then *is* the change record for
+# and commit the diff; the git history then *is* the change record for
 # configuration state.
 checksums:
   /etc/ssh/sshd_config: "unrecorded"

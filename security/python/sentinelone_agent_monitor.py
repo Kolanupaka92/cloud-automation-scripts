@@ -1,41 +1,20 @@
 #!/usr/bin/env python3
-"""Fleet monitor for SentinelOne agent health across an infrastructure estate.
+"""Reconcile SentinelOne coverage against real infrastructure inventory.
 
-An EDR agent that is installed but not actually protecting is worse than no
-agent, because the compliance dashboard shows green. This reconciles three
-views and reports where they disagree:
+The console can only show you hosts it knows about, so a machine that never
+got an agent looks like nothing at all. This compares it against the real host
+list and reports the gaps, plus agents that are registered but not actually
+protecting.
 
-    1. The SentinelOne management console (via its REST API) — what the security
-       team believes is deployed and healthy.
-    2. The infrastructure inventory (an Ansible inventory, or an OpenStack /
-       Nexus host list) — what actually exists and should be covered.
-    3. Optionally the hosts themselves over SSH — whether the agent process is
-       running and the local status agrees with the console.
+    UNPROTECTED     in inventory, no agent registered
+    DISCONNECTED    registered, no check-in within --stale-hours
+    DISABLED        present but in alert-only mode, or action pending
+    OUT_OF_DATE     behind the fleet target version
+    NEEDS_REBOOT    upgraded, pending reboot
+    INFECTED        unresolved threats
+    LOCAL_MISMATCH  console says healthy, host disagrees (--verify-on-host)
 
-Findings
---------
-    UNPROTECTED     host exists in inventory but has no agent in the console —
-                    the gap nobody sees, because the console only shows what it
-                    knows about
-    DISCONNECTED    agent registered but has not checked in within --stale-hours
-    DISABLED        agent present and connected but protection is off, in alert-
-                    only mode, or actively user-disabled
-    OUT_OF_DATE     agent version behind the fleet's target version
-    NEEDS_REBOOT    agent upgraded but pending a reboot to take full effect
-    INFECTED        unresolved threats on the endpoint
-    LOCAL_MISMATCH  the console says healthy but the host's own agent status
-                    disagrees (only with --verify-on-host)
-
-Read-only. This never disables, uninstalls or reconfigures an agent.
-
-Examples
---------
-    ./sentinelone_agent_monitor.py --inventory hosts.ini
-    ./sentinelone_agent_monitor.py --openstack-hosts --format json
-    ./sentinelone_agent_monitor.py --inventory hosts.ini --verify-on-host \\
-        --finding UNPROTECTED --fail-on-findings
-
-Credentials come from S1_API_TOKEN and S1_CONSOLE_URL in the environment.
+Needs S1_CONSOLE_URL and S1_API_TOKEN. Read-only.
 """
 
 from __future__ import annotations
@@ -278,7 +257,7 @@ def evaluate(agents: list[dict], inventory: set[str], target_version: str | None
         mitigation = agent.get("mitigationMode")
         if mitigation and mitigation not in ("protect",):
             rows.append(row("DISABLED", host, version, last_seen,
-                            f"mitigation mode is '{mitigation}', not 'protect' — "
+                            f"mitigation mode is '{mitigation}', not 'protect', "
                             "threats are detected but not stopped"))
 
         if agent.get("threatRebootRequired"):

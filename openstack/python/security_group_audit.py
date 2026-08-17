@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
-"""Audit Neutron security groups for overly permissive ingress rules.
+"""Audit security groups for over-permissive ingress.
 
-Findings are ranked so the report can be handed straight to a security review:
+Severity is based on exposure: world-open admin ports (SSH, RDP, databases,
+k8s API) rank above world-open anything else, which ranks above a wide RFC1918
+source reaching an admin port. Only groups attached to a port are checked
+unless --include-unused.
 
-    CRITICAL  world-open ingress (0.0.0.0/0 or ::/0) on an admin port
-              (SSH, RDP, WinRM, database, etcd, Kubernetes API, Redis, ...)
-    HIGH      world-open ingress on any other port, or a world-open ALL/ANY rule
-    MEDIUM    ingress from a wide RFC1918 range (/8, /12, /16) on an admin port
-    INFO      security group with no rules at all, or attached to nothing
-
-Only groups actually attached to a port are reported by default, because an
-unused permissive group is noise; pass --include-unused to see everything.
-
-Examples
---------
-    ./security_group_audit.py --min-severity HIGH
-    ./security_group_audit.py --format json | jq '.[] | select(.severity=="CRITICAL")'
-    ./security_group_audit.py --project 8f2c... --include-unused
+Use --fail-on-findings to gate a pipeline on it.
 """
 
 from __future__ import annotations
@@ -87,7 +77,7 @@ def classify(rule) -> tuple[str, str] | None:
 
     cidr = rule.remote_ip_prefix
     if not cidr:
-        # Remote *group* references are the good pattern — nothing to flag.
+        # Remote *group* references are the good pattern; nothing to flag.
         return None
 
     admin = covered_admin_ports(rule)

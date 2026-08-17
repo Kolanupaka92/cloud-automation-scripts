@@ -1,8 +1,8 @@
 """Exercise the Nexus helpers against real SDK model objects.
 
 These build genuine azure-mgmt-networkcloud model instances rather than mocks,
-so the tests fail if the SDK changes shape — which is exactly the breakage that
-would otherwise appear as every field silently reading as None.
+so the tests fail if the SDK changes shape. Otherwise that turns up as every
+field reading None against a live cloud.
 """
 import pathlib
 import sys

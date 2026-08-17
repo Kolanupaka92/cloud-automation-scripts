@@ -1,30 +1,15 @@
 #!/usr/bin/env python3
-"""Audit Calico network policy for gaps, shadowing and dangerous rules.
+"""Audit Calico policy for gaps and unreachable rules.
 
-`kubectl get networkpolicy` tells you what exists. It does not tell you that a
-namespace has no policy at all, that a high-order deny is unreachable because an
-earlier allow already matched, or that a policy selects every endpoint in the
-cluster because someone left the selector empty.
+kubectl will tell you what exists. It will not tell you that a namespace has
+no policy at all, that a high-order deny can never match because a catch-all
+already fired, or that two policies share an order so their evaluation
+sequence is undefined.
 
-Checks
-------
-    coverage    namespaces with no NetworkPolicy and no GNP selecting them —
-                every pod there accepts traffic from anywhere in the cluster
-    shadowing   policies that can never take effect because a lower-order policy
-                already matches the same endpoints and takes an action
-    dangerous   selector matches all endpoints, allow-from-any-source ingress,
-                allow-to-any-destination egress on a non-egress-gateway policy
-    dns         default-deny egress in effect with no allow for kube-dns
-    hygiene     policies with no rules, references to non-existent selectors,
-                and duplicate order values (evaluation order becomes arbitrary)
+Checks: namespace coverage, shadowing, duplicate orders, match-all selectors,
+allow-from-anywhere rules, and default-deny egress with no DNS exception.
 
-Read-only — this never modifies a policy. Use calico_gnp_update.yml for changes.
-
-Examples
---------
-    ./calico_policy_audit.py
-    ./calico_policy_audit.py --namespace payments --format json
-    ./calico_policy_audit.py --min-severity WARN --fail-on-findings
+Read-only. Changes go through calico_gnp_update.yml.
 """
 
 from __future__ import annotations
@@ -134,7 +119,7 @@ def check_coverage(namespaces, netpols, gnps, include_system: bool) -> list[dict
             continue
         rows.append(finding(
             "CRITICAL", "coverage", name,
-            "no NetworkPolicy and no GlobalNetworkPolicy selects this namespace — "
+            "no NetworkPolicy and no GlobalNetworkPolicy selects this namespace, "
             "every pod accepts traffic from anywhere in the cluster",
         ))
 
@@ -156,7 +141,7 @@ def check_dangerous(netpols, gnps) -> list[dict]:
             rows.append(finding(
                 "WARN", "dangerous", name,
                 f"selector '{selector or '(empty)'}' matches every endpoint in the "
-                "cluster — verify this breadth is intended",
+                "cluster, verify this breadth is intended",
             ))
 
         for direction in ("ingress", "egress"):
@@ -173,13 +158,13 @@ def check_dangerous(netpols, gnps) -> list[dict]:
                     rows.append(finding(
                         "CRITICAL", "dangerous", name,
                         f"{direction} Allow rule has no source/destination or port "
-                        "constraint — it permits everything",
+                        "constraint; it permits everything",
                     ))
                 for net in peer.get("nets", []) or []:
                     if net in ("0.0.0.0/0", "::/0") and direction == "ingress":
                         rows.append(finding(
                             "CRITICAL", "dangerous", name,
-                            f"ingress Allow from {net} — the policy is open to the internet "
+                            f"ingress Allow from {net}; the policy is open to the internet "
                             "wherever the cluster is routable",
                         ))
 
@@ -189,7 +174,7 @@ def check_dangerous(netpols, gnps) -> list[dict]:
         selector = spec.get("podSelector", {})
         if selector == {} and not spec.get("policyTypes"):
             rows.append(finding("WARN", "dangerous", name,
-                                "empty podSelector with no policyTypes — this selects every "
+                                "empty podSelector with no policyTypes; this selects every "
                                 "pod in the namespace but declares no direction"))
     return rows
 
@@ -267,7 +252,7 @@ def check_dns(gnps, netpols) -> list[dict]:
         return [finding("INFO", "dns", ", ".join(default_deny_egress),
                         "default-deny egress is in effect and DNS (53) is explicitly allowed")]
     return [finding("CRITICAL", "dns", ", ".join(default_deny_egress),
-                    "default-deny egress is in effect but no policy allows port 53 — "
+                    "default-deny egress is in effect but no policy allows port 53, "
                     "pod DNS resolution is broken cluster-wide")]
 
 
@@ -281,7 +266,7 @@ def check_hygiene(gnps, netpols) -> list[dict]:
                                 "policy defines no ingress or egress rules"))
         if spec.get("order") is None:
             rows.append(finding("WARN", "hygiene", name,
-                                "no order set — this policy is evaluated last, after every "
+                                "no order set; this policy is evaluated last, after every "
                                 "policy that does set one"))
     for netpol in netpols:
         name = f"{netpol['metadata']['namespace']}/{netpol['metadata']['name']}"

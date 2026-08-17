@@ -72,7 +72,7 @@
         msg: >-
           BMM {{ item.machine }} (rack {{ item.rack }} slot {{ item.slot }})
           reports problems while its Kubernetes node {{ item.k8s_node }} is Ready:
-          {{ item.problems }} — investigate before the next maintenance window.
+          {{ item.problems }}, investigate before the next maintenance window.
       loop: "{{ bmm_machines | default([]) | rejectattr('_healthy') | list }}"
       loop_control:
         label: "{{ item.machine }}"

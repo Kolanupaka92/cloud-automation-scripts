@@ -6,7 +6,7 @@
 #   ansible-playbook azure_resource_stack.yml -e @stacks/payments-prod.yml
 #   ansible-playbook azure_resource_stack.yml -e @stacks/payments-prod.yml -e state=absent
 #
-# Building these by hand — or by copying last project's portal clicks — is how
+# Building these by hand, or by copying last project's portal clicks, is how
 # an estate ends up with public blob containers, storage accounts allowing TLS
 # 1.0, VMs with public IPs "just for troubleshooting", and no diagnostic
 # settings anywhere. Every default here is the safe one, and the unsafe options

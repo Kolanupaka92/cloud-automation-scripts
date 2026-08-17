@@ -44,7 +44,7 @@
       ansible.builtin.debug:
         msg: >-
           {{ item.metadata.namespace }}/{{ item.metadata.name }}:
-          {{ item.status.reason | default('Failed') }} — {{ item.status.message | default('') }}
+          {{ item.status.reason | default('Failed') }}, {{ item.status.message | default('') }}
       loop: >-
         {{ evicted.results | map(attribute='resources') | select('defined') | list | flatten }}
       loop_control:
@@ -63,7 +63,7 @@
       ansible.builtin.debug:
         msg: >-
           {{ item.metadata.namespace }}/{{ item.metadata.name }} has containers with no
-          resource requests — the scheduler cannot place these safely and they are
+          resource requests; the scheduler cannot place these safely and they are
           the first thing evicted under node pressure.
       loop: >-
         {{ deployments.results | map(attribute='resources') | select('defined') | list | flatten }}

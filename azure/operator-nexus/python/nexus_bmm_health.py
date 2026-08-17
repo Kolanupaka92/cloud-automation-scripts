@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
-"""Fleet health report for Operator Nexus bare metal machines.
+"""Fleet health for Operator Nexus bare metal machines.
 
-This is the report you want open before a quarterly maintenance window and
-during any BMM incident. For every machine in scope it reports the control-plane
-view (readyState, detailedStatus, powerState, cordonStatus, hardware validation)
-plus the tenant impact (how many tenant VMs would move if this machine went
-down) and the Nexus Kubernetes node it backs.
+Per machine: readyState, power, cordon, detailedStatus, hardware validation,
+tenant VMs hosted, backing Kubernetes node. Summarised per rack, because
+during a window the question is not "is this machine healthy" but "can this
+rack lose one right now".
 
-Rack-level summaries matter more than per-machine ones during maintenance: the
-question is never "is BMM-07 healthy" but "can this rack lose a machine right
-now without breaking a control-plane quorum".
+--maintenance-readiness gives a straight GO/NO-GO before a window starts.
 
-Exit codes: 0 all healthy, 1 warnings, 2 machines unavailable or not ready.
-
-Examples
---------
-    ./nexus_bmm_health.py --resource-group rg-nexus-prod
-    ./nexus_bmm_health.py --rack rack-03 --format json
-    ./nexus_bmm_health.py --unhealthy-only --fail-on-findings
-    ./nexus_bmm_health.py --maintenance-readiness   # pre-window gate
+Exit 0 healthy, 1 warnings, 2 not ready.
 """
 
 from __future__ import annotations

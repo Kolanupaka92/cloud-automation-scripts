@@ -13,7 +13,7 @@
 # and reports exactly which host is off it.
 #
 # Validation is always safe to run. Remediation requires apply_updates=true, a
-# change record, and a drained host — the playbook refuses otherwise, because a
+# change record, and a drained host; the playbook refuses otherwise, because a
 # firmware flash means a reboot.
 
 - name: Validate server firmware against the approved baseline
@@ -31,7 +31,7 @@
     report_dir: "{{ playbook_dir }}/reports"
 
     # The approved baseline. Keyed by hardware model so a mixed fleet works.
-    # Regenerate after a vendor bundle is approved, and commit the diff — the
+    # Regenerate after a vendor bundle is approved, and commit the diff; the
     # git history then is the firmware change record.
     firmware_baseline:
       "PowerEdge R650":
@@ -199,13 +199,13 @@
     - name: Report this host's firmware status
       ansible.builtin.debug:
         msg: >-
-          {{ inventory_hostname }} ({{ hw_model }}):
-          BIOS {{ fw_bios }}, BMC {{ fw_bmc }},
-          {{ nic_firmware.stdout_lines | default([]) | length }} NIC(s),
-          RAID {{ firmware_inventory.raid }} —
+          {{ inventory_hostname }} ({{ hw_model }})
           {{ 'ON BASELINE' if (firmware_findings | default([])) | length == 0
              else ((firmware_findings | length) ~ ' deviation(s): '
                    ~ (firmware_findings | map(attribute='component') | join(', '))) }}
+          [BIOS {{ fw_bios }}, BMC {{ fw_bmc }},
+          {{ nic_firmware.stdout_lines | default([]) | length }} NIC(s),
+          RAID {{ firmware_inventory.raid }}]
 
     # ---------------------------------------------------------------- remediation
     - name: Refuse to flash firmware without a change record

@@ -1,43 +1,18 @@
 #!/usr/bin/env python3
-"""Pre-upgrade validation for Pure Storage FlashArray, including API token and
-VIP reachability checks.
+"""Pre-upgrade checks for a Pure FlashArray.
 
-Two failures account for most aborted Pure upgrades, and both are trivially
-detectable beforehand:
+Two things account for most aborted upgrades and both are cheap to check
+beforehand: the API token has expired or the account behind it was disabled,
+and a data VIP is not reachable from the hosts that matter even though it
+answers from the jump box.
 
-  1. **The API token no longer works.** Tokens are per-user, they expire, and the
-     account behind them gets disabled or loses its role during an access review.
-     Nobody notices until the upgrade automation authenticates at the start of
-     the window and fails.
+Also checks multipath redundancy per host, controller readiness, open alerts,
+capacity, and whether the target version is a sane upgrade path.
 
-  2. **A VIP is not actually reachable from where it matters.** The management
-     VIP answers from the jump host but not from the compute nodes; or one
-     controller's iSCSI/NVMe data VIP is dark, so the array survives the
-     controller failover on paper but half the hosts lose paths in practice.
-
-Checks
-------
-    token       authenticate, report the token's user, role, expiry and whether
-                the account is enabled; warn well before expiry
-    vip         TCP reachability of every management and data VIP, from this
-                host and optionally from a list of remote hosts over SSH
-    paths       per-host multipath state — every LUN has paths through both
-                controllers, none in a failed state
-    version     current Purity version, target compatibility, pending upgrade
-    health      array-level alerts, controller status, capacity headroom,
-                and whether both controllers are ready for a failover
-
-Read-only in every mode. Nothing here changes array state.
-
-Examples
---------
-    ./pure_upgrade_preflight.py --array flasharray-01.example.net
-    ./pure_upgrade_preflight.py --array fa-01 --check token,vip --format json
     ./pure_upgrade_preflight.py --array fa-01 --from-hosts compute-01,compute-02
-    ./pure_upgrade_preflight.py --array fa-01 --target-version 6.5.4 --fail-on-findings
+    ./pure_upgrade_preflight.py --array fa-01 --target-version 6.5.4
 
-Credentials come from PURE_API_TOKEN in the environment, or from
-`--token-file`, never from this repository.
+Token comes from PURE_API_TOKEN or --token-file. Read-only throughout.
 """
 
 from __future__ import annotations
@@ -68,6 +43,9 @@ VIP_PORTS = {
 }
 
 TOKEN_EXPIRY_WARN_DAYS = 30
+
+# API version pinned deliberately. 2.26 is what our arrays are on; newer
+# versions move some of the fields read below.
 
 
 def setup_logging(verbose: bool) -> None:
@@ -118,7 +96,7 @@ def read_token(token_file: str | None) -> str:
 
 
 class PureClient:
-    """Minimal FlashArray REST client — no vendor SDK required on a jump host."""
+    """Minimal FlashArray REST client, no vendor SDK required on a jump host."""
 
     def __init__(self, array: str, token: str, verify_tls: bool, api_version: str = "2.26"):
         self.base = f"https://{array}/api/{api_version}"
@@ -160,7 +138,7 @@ class PureClient:
             self.session_token = headers.get("x-auth-token")
             return True, "authenticated"
         if status in (401, 403):
-            return False, (f"token rejected (HTTP {status}) — expired, revoked, "
+            return False, (f"token rejected (HTTP {status}), expired, revoked, "
                            "or the account is disabled")
         if status == 0:
             return False, f"could not reach {self.array}: {(body or {}).get('error', 'no route')}"
@@ -182,7 +160,7 @@ def check_token(client: PureClient) -> list[dict]:
     admins = client.get("/admins?expose_api_token=false")
     if admins is None:
         rows.append(finding("WARN", "token", client.array,
-                            "authenticated, but the admin list is not readable — "
+                            "authenticated, but the admin list is not readable, "
                             "the token's role may be too narrow for the upgrade"))
         return rows
 
@@ -205,7 +183,7 @@ def check_token(client: PureClient) -> list[dict]:
             elif remaining <= timedelta(days=TOKEN_EXPIRY_WARN_DAYS):
                 rows.append(finding("WARN", "token", name,
                                     f"API token expires in {remaining.days} day(s) "
-                                    f"({expires.date()}) — renew before the window"))
+                                    f"({expires.date()}), renew before the window"))
             else:
                 rows.append(finding("INFO", "token", name,
                                     f"API token valid until {expires.date()}"))
@@ -225,7 +203,7 @@ def tcp_probe(host: str, port: int, timeout: float = 5.0) -> tuple[bool, str]:
 
 
 def remote_tcp_probe(via_host: str, target: str, port: int, ssh_user: str) -> tuple[bool, str]:
-    """Probe a VIP from somewhere else — the check that catches asymmetric routing."""
+    """Probe a VIP from somewhere else; the check that catches asymmetric routing."""
     command = (
         f"timeout 5 bash -c '</dev/tcp/{target}/{port}' 2>/dev/null "
         f"&& echo REACHABLE || echo UNREACHABLE"
@@ -281,11 +259,11 @@ def check_vips(client: PureClient, from_hosts: list[str], ssh_user: str) -> list
             ))
 
     # A single reachable data VIP is a single point of failure across a
-    # controller failover, which is exactly what an upgrade performs.
+    # controller failover, which is what a non-disruptive upgrade does.
     data_vips = [v for v in vips if v[0].lower() in ("iscsi", "nvme-tcp")]
     if 0 < len(data_vips) < 2:
         rows.append(finding("CRITICAL", "vip", client.array,
-                            f"only {len(data_vips)} data VIP configured — a controller "
+                            f"only {len(data_vips)} data VIP configured, a controller "
                             "failover during the upgrade will drop all paths"))
     return rows
 
@@ -318,7 +296,7 @@ def check_multipath(from_hosts: list[str], ssh_user: str) -> list[dict]:
                                 f"{failed} failed/faulty path(s) before the upgrade even starts"))
         if maps and active < maps * 2:
             rows.append(finding("CRITICAL", "paths", host,
-                                f"{active} active path(s) across {maps} Pure LUN(s) — "
+                                f"{active} active path(s) across {maps} Pure LUN(s), "
                                 "fewer than two per LUN means no controller redundancy"))
         elif maps:
             rows.append(finding("INFO", "paths", host,
@@ -352,7 +330,7 @@ def check_version(client: PureClient, target: str | None) -> list[dict]:
                                 f"already on the target version {target}"))
         elif cur_parts > tgt_parts:
             rows.append(finding("CRITICAL", "version", client.array,
-                                f"current {current} is newer than target {target} — downgrade"))
+                                f"current {current} is newer than target {target}, downgrade"))
         elif tgt_parts[0] - cur_parts[0] > 1:
             rows.append(finding("CRITICAL", "version", client.array,
                                 f"{current} -> {target} skips a major release; "
@@ -380,7 +358,7 @@ def check_health(client: PureClient) -> list[dict]:
             ))
         if len(ready) < 2:
             rows.append(finding("CRITICAL", "health", client.array,
-                                f"only {len(ready)} controller(s) ready — a non-disruptive "
+                                f"only {len(ready)} controller(s) ready, a non-disruptive "
                                 "upgrade requires both"))
 
     alerts = client.get("/alerts?filter=state='open'")

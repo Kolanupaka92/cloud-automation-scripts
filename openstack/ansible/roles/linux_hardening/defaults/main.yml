@@ -25,7 +25,7 @@ hardening_ssh_kex: >-
   curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
 
 # Kernel parameters. net.ipv4.ip_forward stays enabled on compute and network
-# nodes because Neutron requires it — the role handles that automatically.
+# nodes because Neutron requires it; the role handles that automatically.
 hardening_sysctl:
   net.ipv4.conf.all.accept_redirects: 0
   net.ipv4.conf.all.send_redirects: 0

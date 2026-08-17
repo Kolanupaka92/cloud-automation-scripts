@@ -1,38 +1,20 @@
 #!/usr/bin/env python3
-"""Migrate a VMware virtual machine to OpenStack, one VM at a time, resumably.
+"""Migrate one VMware VM to OpenStack.
 
-The hard part of a VMware-to-OpenStack migration is never the disk conversion —
-it is everything around it: choosing a flavor that actually fits, mapping port
-groups to Neutron networks, preserving MAC and IP so the application's peers and
-firewall rules still work, and knowing exactly which step failed at 04:00.
+Phases: assess, snapshot, export, convert, upload, provision, validate,
+cutover. Each is journalled to a state file, so --resume picks up from
+wherever it stopped instead of starting over.
 
-Phases (each is idempotent and journalled, so `--resume` picks up where it stopped):
+The disk conversion is the easy part. The rest is picking a flavor that
+actually fits, mapping port groups to Neutron networks, and keeping MAC and IP
+so the application's peers and firewall rules still work.
 
-    assess      read the source VM's CPU/RAM/disk/NIC inventory, pick a matching
-                flavor, resolve every port group to a Neutron network, and
-                report anything unmappable — without touching either platform
-    snapshot    quiesce and snapshot the source VM (guest tools when available)
-    export      export the VMDK(s) via ovftool or govc
-    convert     qemu-img convert to raw/qcow2, with a checksum either side
-    upload      create the Glance image, with the correct hw_ properties
-    provision   create ports with the preserved MAC/IP, boot the instance
-    validate    confirm the instance boots, its ports are ACTIVE, and it is
-                reachable, then report what a human must verify
-    cutover     power off the source VM and record the rollback point
-
-Nothing is ever deleted on the VMware side. Rollback is always "power the source
-VM back on", and the script prints that command explicitly at the end.
-
-Examples
---------
     ./vmware_to_openstack_migrate.py --vm app-server-01 --assess-only
     ./vmware_to_openstack_migrate.py --vm app-server-01 --plan plans/wave3.yml
-    ./vmware_to_openstack_migrate.py --vm app-server-01 --phase export,convert
     ./vmware_to_openstack_migrate.py --resume state/app-server-01.json
 
-Requires `govc` (VMware CLI) and `qemu-img` on PATH. Source credentials come
-from the standard GOVC_* environment variables and are never read from a file
-in this repository.
+Needs govc and qemu-img. Source credentials come from the GOVC_* environment
+variables. The source VM is powered off at cutover, never deleted.
 """
 
 from __future__ import annotations
@@ -195,7 +177,7 @@ def assess(conn, vm: str, plan: dict) -> tuple[list[dict], dict | None]:
 
     if inventory["tools_status"] not in ("toolsOk", "toolsOld"):
         rows.append(row("assess", "WARN", vm,
-                        f"VMware Tools status is {inventory['tools_status']} — "
+                        f"VMware Tools status is {inventory['tools_status']}, "
                         "a quiesced snapshot will not be possible"))
 
     if inventory["firmware"].lower() == "efi":
@@ -209,7 +191,7 @@ def assess(conn, vm: str, plan: dict) -> tuple[list[dict], dict | None]:
     else:
         rows.append(row("assess", "OK", vm,
                         f"flavor {flavor.name} ({flavor.vcpus} vCPU / {flavor.ram} MB / "
-                        f"{flavor.disk} GB) — {why}"))
+                        f"{flavor.disk} GB), {why}"))
 
     # Every port group must map to a Neutron network, or the VM cannot be built.
     mapping = plan.get("network_map", {})
@@ -284,8 +266,9 @@ def convert(export_dir: Path, fmt: str, execute: bool) -> tuple[list[dict], Path
     if not vmdks:
         return [row("convert", "FAIL", str(export_dir), "no VMDK to convert")], None
 
-    # The largest disk is the boot disk in every migration I have seen; data
-    # disks become Cinder volumes and are handled separately by the plan.
+    # Largest disk is the boot disk in everything I've migrated so far.
+    # TODO: data disks still have to be done by hand afterwards. Should attach
+    # them as Cinder volumes here once I've got a case with more than one.
     source = max(vmdks, key=lambda p: p.stat().st_size)
     target = source.with_suffix(f".{fmt}")
 

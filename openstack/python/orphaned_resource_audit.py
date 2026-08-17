@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""Find (and optionally reclaim) orphaned resources across an OpenStack region.
+"""Find (and optionally delete) unowned resources in a region.
 
-Long-lived regions accumulate resources nobody owns any more: volumes detached
-years ago, floating IPs nobody released, ports left behind by failed builds,
-snapshots whose parent is gone. They cost quota, they slow the control plane,
-and they make capacity planning lie.
+Covers available volumes, snapshots whose source volume is gone, unassociated
+floating IPs, DOWN unbound ports, and unused private images. Deletion is per
+resource class and always confirms first.
 
-Checks performed
-----------------
-    volumes       available (never re-attached) for longer than --age-days
-    snapshots     whose source volume no longer exists
-    floating-ips  allocated but not associated with a port
-    ports         DOWN, not bound to a device, not a router/DHCP port
-    images        private, not in use by any instance, older than --age-days
-
-Deletion is opt-in per resource class and always confirms first:
-
-    ./orphaned_resource_audit.py                          # report everything
     ./orphaned_resource_audit.py --check volumes --age-days 90
     ./orphaned_resource_audit.py --check floating-ips --delete
 """

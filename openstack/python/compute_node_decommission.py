@@ -1,30 +1,14 @@
 #!/usr/bin/env python3
-"""Permanently decommission a compute node from an OpenStack region.
+"""Remove a compute node from the region for good.
 
-Decommissioning is not "drain and forget". A half-removed compute node leaves
-Nova services, Placement resource providers, Neutron agents and host aggregate
-memberships behind, which then break the next upgrade, distort capacity
-reporting, and make the scheduler consider a host that no longer exists.
+Aggregates, nova services, neutron agents, then the Placement resource
+provider. The last one gets missed when this is done by hand and turns up
+months later as scheduling and capacity reporting that do not add up.
 
-Stages, each verified before the next begins:
+Defaults to a dry run. --execute is required to change anything.
 
-    1. verify        the host is drained (no instances of any kind, including
-                     shelved and errored) and already disabled
-    2. aggregates    remove the host from every host aggregate and AZ
-    3. services      delete nova-compute from the Nova service list
-    4. neutron       delete the L2/L3 agents registered for this host
-    5. placement     delete the resource provider and its inventories
-    6. verify        confirm the host is absent from every inventory
-
-Because every stage is destructive and irreversible, the default is a full
-dry-run report; `--execute` is required to change anything, and each stage
-confirms independently unless `--yes` is passed.
-
-Examples
---------
     ./compute_node_decommission.py --host compute-042
     ./compute_node_decommission.py --host compute-042 --execute
-    ./compute_node_decommission.py --host compute-042 --execute --stage placement
 """
 
 from __future__ import annotations
@@ -63,7 +47,7 @@ def verify_drained(conn, host: str) -> tuple[bool, list[dict]]:
 
     if service is None:
         rows.append(row("verify", "WARN", host,
-                        "no nova-compute service found — may already be partly removed"))
+                        "no nova-compute service found, may already be partly removed"))
     elif service.status != "disabled":
         rows.append(row("verify", "BLOCKED", host,
                         "nova-compute is still enabled; drain and disable it first"))
@@ -148,8 +132,7 @@ def delete_network_agents(conn, host: str, execute: bool, assume_yes: bool) -> l
 
 
 def delete_resource_provider(conn, host: str, execute: bool, assume_yes: bool) -> list[dict]:
-    """Placement is the stage most often forgotten, and the one that quietly
-    breaks scheduling and capacity reporting months later."""
+    """Placement. This is the one that gets forgotten by hand."""
     rows = []
     try:
         providers = [p for p in conn.placement.resource_providers() if p.name == host]
@@ -171,7 +154,7 @@ def delete_resource_provider(conn, host: str, execute: bool, assume_yes: bool) -
             conn.placement.delete_resource_provider(provider, ignore_missing=True)
             rows.append(row("placement", "DELETED", provider.name, detail))
         except Exception as exc:  # noqa: BLE001
-            # A provider with live allocations cannot be deleted — that means
+            # A provider with live allocations cannot be deleted; that means
             # something is still assigned to a host we believe is empty.
             rows.append(row("placement", "FAILED", provider.name,
                             f"{detail}: {exc} (allocations may still exist)"))
@@ -261,7 +244,7 @@ def main() -> int:
     render(rows, COLUMNS, args.format)
 
     if not execute and args.format == "table":
-        print(f"\nDry run — nothing was changed. Re-run with --execute to decommission "
+        print(f"\nDry run; nothing was changed. Re-run with --execute to decommission "
               f"{args.host}.")
 
     failures = [r for r in rows if r["status"] in ("FAILED", "INCOMPLETE")]

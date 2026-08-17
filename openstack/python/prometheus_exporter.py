@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
-"""Prometheus exporter for OpenStack control-plane and capacity metrics.
+"""Prometheus exporter for cloud-level OpenStack metrics.
 
-The stock exporters cover the hosts; this one covers the *cloud* — the signals
-that actually predict user-visible failure:
-
-    openstack_service_up{binary,host,zone}            nova service liveness
-    openstack_network_agent_up{binary,host,type}      neutron agent liveness
-    openstack_hypervisor_vcpus_{total,used}{host}     scheduler-visible capacity
-    openstack_hypervisor_memory_mb_{total,used}{host}
-    openstack_hypervisor_disk_gb_{total,used}{host}
-    openstack_instances_by_state{state}               ERROR/BUILD backlog
-    openstack_volumes_by_status{status}               cinder backlog
-    openstack_floating_ips{state}                     used vs free FIP pool
-    openstack_scrape_duration_seconds{}               exporter health
-    openstack_scrape_errors_total{}
-
-Run it as a long-lived exporter, or dump one scrape and exit for testing:
+The node exporters cover the hosts; this covers the cloud. Service and agent
+liveness, scheduler-visible capacity from Placement, instance and volume state
+counts, and floating IP pool usage.
 
     ./prometheus_exporter.py --port 9183
-    ./prometheus_exporter.py --once
+    ./prometheus_exporter.py --once      # one scrape to stdout, for testing
 """
 
 from __future__ import annotations
@@ -79,7 +67,7 @@ def collect_agents(conn) -> None:
 def collect_hypervisors(conn) -> None:
     # Capacity comes from Placement: Nova stopped returning these fields on the
     # hypervisor API at microversion 2.88, and an exporter publishing zeros is
-    # worse than one publishing nothing — every capacity alert would go quiet.
+    # worse than one publishing nothing; every capacity alert would go quiet.
     hypervisors = list(conn.compute.hypervisors(details=True))
     capacity = host_capacity(conn, hypervisors)
 

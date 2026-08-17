@@ -9,7 +9,7 @@ drift_tracked_files:
   - /etc/resolv.conf
 
 # Config keys that must hold a specific value. Drift here is what actually
-# causes incidents — a compute node left with debug logging on, or a stale
+# causes incidents, a compute node left with debug logging on, or a stale
 # transport_url after a controller was replaced.
 drift_config_expectations:
   - path: /etc/nova/nova.conf

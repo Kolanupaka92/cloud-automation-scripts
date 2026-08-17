@@ -1,42 +1,24 @@
 #!/usr/bin/env python3
-"""Onboard a tenant or provider network into OpenStack from a declarative spec.
+"""Create a tenant or provider network from a YAML spec.
 
-Network onboarding is the request that arrives most often and gets done by hand
-most often — and hand-built networks are where inconsistent MTUs, missing DNS,
-overlapping subnets and forgotten security groups come from. This takes a YAML
-spec, validates it against the region *before* touching anything, then creates
-the network, subnets, router, and default security group idempotently.
+Everything is validated against the region before anything is created: VLAN
+free on the physical network, CIDR not overlapping an existing subnet in the
+project, allocation pools inside the CIDR and clear of the gateway, MTU
+sensible for the segment, external network real. Re-running is safe.
 
-Validation performed before any write:
-
-    * project exists and the caller may act on it
-    * VLAN segmentation id is free on the target physical network
-    * CIDR does not overlap any existing subnet in the same project or in any
-      network sharing the physical segment
-    * allocation pools sit inside the CIDR and exclude the gateway
-    * MTU is consistent with the physical network's configured MTU
-    * external network exists when a router gateway is requested
-
-Re-running with the same spec is safe: existing objects are matched by name and
-reported as unchanged rather than duplicated.
-
-Examples
---------
-    ./network_onboarding.py --spec networks/prod-app.yml --dry-run
+    ./network_onboarding.py --spec networks/prod-app.yml --validate-only
     ./network_onboarding.py --spec networks/prod-app.yml
-    ./network_onboarding.py --spec networks/prod-app.yml --delete   # tear down
+    ./network_onboarding.py --spec networks/prod-app.yml --delete
 
-Spec format (YAML):
+Spec format:
 
     project: app-prod
     network:
       name: net-app-prod
-      provider_type: vlan          # vlan | vxlan | flat
-      physical_network: physnet1   # required for vlan/flat
-      segmentation_id: 1234        # required for vlan
+      provider_type: vlan
+      physical_network: physnet1
+      segmentation_id: 1234
       mtu: 9000
-      shared: false
-      port_security: true
     subnets:
       - name: subnet-app-prod
         cidr: 10.40.12.0/24
@@ -44,14 +26,9 @@ Spec format (YAML):
         allocation_pools:
           - {start: 10.40.12.10, end: 10.40.12.200}
         dns_nameservers: [10.40.0.10, 10.40.0.11]
-        enable_dhcp: true
     router:
       name: rtr-app-prod
       external_network: public
-    security_group:
-      name: sg-app-prod
-      rules:
-        - {direction: ingress, protocol: tcp, port: 443, remote_ip_prefix: 10.0.0.0/8}
 """
 
 from __future__ import annotations
@@ -407,7 +384,7 @@ def main() -> int:
     render(rows, COLUMNS, args.format)
 
     if not execute and args.format == "table":
-        print("\nDry run — nothing was changed.")
+        print("\nDry run; nothing was changed.")
     return 0
 
 

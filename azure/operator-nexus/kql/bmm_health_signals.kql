@@ -1,4 +1,4 @@
-// Operator Nexus — bare metal machine health signals.
+// Operator Nexus, bare metal machine health signals.
 //
 // These are the queries behind the BMM fleet health workbook. Each block is
 // standalone; paste into Log Analytics or reference from a workbook tile.
@@ -33,7 +33,7 @@ AzureDiagnostics
 | order by RackId asc, RackSlot asc
 
 // ---------------------------------------------------------------------------
-// 2. Rack-level readiness — the number that decides GO / NO-GO on a window.
+// 2. Rack-level readiness; the number that decides GO / NO-GO on a window.
 // ---------------------------------------------------------------------------
 AzureDiagnostics
 | where ResourceType == "BAREMETALMACHINES"
@@ -54,7 +54,7 @@ AzureDiagnostics
 | order by RackId asc
 
 // ---------------------------------------------------------------------------
-// 3. State transitions over the window — what actually changed and when.
+// 3. State transitions over the window; what actually changed and when.
 //    Use this to prove a maintenance window did only what it was supposed to.
 // ---------------------------------------------------------------------------
 let window = 7d;
@@ -108,8 +108,8 @@ KubeNodeInventory
 | project LastSeen, KubernetesNode, NodeStatus, MachineName, RackId, PowerState, BmmReady
 | extend Correlation = case(
       NodeStatus != "Ready" and PowerState == "Off", "expected: BMM is powered off",
-      NodeStatus != "Ready" and BmmReady != "True",  "BMM is also unhealthy — hardware first",
-      NodeStatus != "Ready",                          "BMM healthy but node NotReady — kubelet/CNI",
+      NodeStatus != "Ready" and BmmReady != "True",  "BMM is also unhealthy, hardware first",
+      NodeStatus != "Ready",                          "BMM healthy but node NotReady, kubelet/CNI",
       "healthy")
 | where NodeStatus != "Ready"
 | order by RackId asc
@@ -144,7 +144,7 @@ InsightsMetrics
 | order by Errors desc, Drops desc
 
 // ---------------------------------------------------------------------------
-// 8. Maintenance window audit trail — every power and cordon action, by whom.
+// 8. Maintenance window audit trail; every power and cordon action, by whom.
 //    This is the query that answers "who took that machine down".
 // ---------------------------------------------------------------------------
 let window = 30d;

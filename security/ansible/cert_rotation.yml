@@ -10,7 +10,7 @@
 # Certificate rotation fails in exactly two ways, and this playbook is built
 # around preventing both:
 #
-#   1. The new certificate is wrong — wrong CN/SAN, wrong chain order, key does
+#   1. The new certificate is wrong, wrong CN/SAN, wrong chain order, key does
 #      not match, already expired, or signed by a CA the clients do not trust.
 #      Every one of those is checked BEFORE the old certificate is replaced.
 #   2. Something that consumed the old certificate is forgotten, and it breaks
@@ -127,7 +127,7 @@
     - name: Require a change record
       ansible.builtin.assert:
         that: change_id != 'unspecified'
-        fail_msg: "Pass -e change_id=CHG####### — rotation restarts TLS listeners."
+        fail_msg: "Pass -e change_id=CHG#######, rotation restarts TLS listeners."
 
     - name: Ensure the backup directory exists
       ansible.builtin.file:
@@ -208,7 +208,7 @@
 
     - name: Verify each certificate matches its private key
       # A mismatched key is the failure that only surfaces when the service
-      # restarts — by which point the listener is already down.
+      # restarts; by which point the listener is already down.
       community.crypto.openssl_privatekey_info:
         path: "{{ item.item.path | regex_replace('\\.(crt|pem)$', '.key') }}"
       delegate_to: localhost
@@ -224,8 +224,8 @@
         that:
           - item.0.public_key | default('a') == item.1.public_key | default('b')
         fail_msg: >-
-          {{ item.0.item.path | basename }} does not match its private key —
-          the service would fail to start after rotation.
+          {{ item.0.item.path | basename }} does not match its private key.
+          The service would fail to start after rotation.
         success_msg: "{{ item.0.item.path | basename }} matches its key"
       loop: "{{ new_cert_info.results | zip(key_info.results) | list }}"
       loop_control:
@@ -238,7 +238,7 @@
           {{ item.item.path | basename }}:
           CN={{ (item.subject | default({})).get('commonName', '?') }}
           SANs={{ item.subject_alt_name | default([]) | join(', ') }}
-          — confirm every VIP and service name above appears here.
+          (check every VIP and service name above appears there)
       loop: "{{ new_cert_info.results }}"
       loop_control:
         label: "{{ item.item.path | basename }}"
@@ -308,7 +308,7 @@
           - item.not_after is defined
         fail_msg: >-
           {{ item.item.host }}:{{ item.item.port }} did not present a usable certificate
-          after rotation — roll back with -e rollback=true
+          after rotation, roll back with -e rollback=true
         success_msg: >-
           {{ item.item.host }}:{{ item.item.port }} serves a certificate valid until
           {{ item.not_after }}

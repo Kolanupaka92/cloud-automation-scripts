@@ -5,7 +5,7 @@
 #   ansible-playbook config_drift_detect.yml -l computes -e drift_fail_on_drift=false
 #   ansible-playbook config_drift_detect.yml --tags record   # re-baseline
 #
-# Detection only. Nothing is corrected — an unexplained drift is an
+# Detection only. Nothing is corrected, an unexplained drift is an
 # investigation, not something to silently overwrite.
 
 - name: Detect configuration drift

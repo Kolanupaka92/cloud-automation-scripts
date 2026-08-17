@@ -1,31 +1,13 @@
 #!/usr/bin/env python3
-"""Audit NUMA topology, CPU pinning and hugepage configuration on compute nodes.
+"""NUMA, CPU pinning and hugepage audit for compute nodes.
 
-NUMA misconfiguration is the classic invisible performance bug: everything is
-"up", nothing alerts, and latency-sensitive workloads quietly run 30% slower
-because their vCPUs and memory sit on different sockets, or their vhost-user
-queues land on the wrong node from the NIC.
+Catches the things that never alert but cost 20-30% on latency-sensitive
+workloads: vCPUs pinned outside cpu_dedicated_set, a dedicated set with no
+isolcpus behind it, instance memory spanning sockets, hugepages allocated on
+one NUMA node only, emulator threads left unpinned, NICs with no NUMA
+affinity.
 
-Checks
-------
-    host        NUMA node inventory, per-node free memory, hugepage pools,
-                whether hugepages are balanced across nodes
-    config      nova.conf vs reality — cpu_dedicated_set / cpu_shared_set against
-                the isolated CPUs actually reserved on the kernel command line
-    instances   per-instance NUMA placement: vCPUs and memory on the same node,
-                pinned vCPUs landing inside the dedicated set, emulator threads,
-                hugepage backing where the flavor asks for it
-    nic         SR-IOV / vhost-user interfaces served from a different NUMA node
-                than the instance using them
-
-Read-only. Nothing here changes a running instance — the output is evidence for
-a rebuild or a live migration, both of which are decisions for a human.
-
-Examples
---------
-    ./numa_topology_audit.py --host compute-042
-    ./numa_topology_audit.py --all-hosts --min-severity WARN --format json
-    ./numa_topology_audit.py --host compute-042 --check instances
+Read-only. The output is evidence for a rebuild or a migration, not the fix.
 """
 
 from __future__ import annotations
@@ -87,7 +69,7 @@ def check_host_topology(host: str, user: str) -> list[dict]:
     nodes = parse_numactl(out)
     if len(nodes) < 2:
         rows.append(finding("INFO", host, "host", "topology",
-                            f"single NUMA node ({len(nodes)}) — pinning has no effect here"))
+                            f"single NUMA node ({len(nodes)}), pinning has no effect here"))
         return rows
 
     rows.append(finding("INFO", host, "host", "topology",
@@ -131,7 +113,7 @@ def check_host_topology(host: str, user: str) -> list[dict]:
             if len(allocated) < len(nodes):
                 rows.append(finding("CRITICAL", host, "host", f"hugepages-{size}",
                                     f"allocated on nodes {sorted(allocated)} but the host has "
-                                    f"{len(nodes)} NUMA nodes — instances cannot be placed evenly"))
+                                    f"{len(nodes)} NUMA nodes, instances cannot be placed evenly"))
             elif len(set(allocated.values())) > 1:
                 rows.append(finding("WARN", host, "host", f"hugepages-{size}",
                                     f"uneven pools across nodes: {allocated}"))
@@ -158,7 +140,7 @@ def check_nova_config(host: str, user: str) -> list[dict]:
 
     if not config.get("cpu_dedicated_set") and not config.get("vcpu_pin_set"):
         rows.append(finding("WARN", host, "config", "cpu_dedicated_set",
-                            "no dedicated CPU set configured — pinned instances will "
+                            "no dedicated CPU set configured, pinned instances will "
                             "compete with host processes"))
     if config.get("vcpu_pin_set"):
         rows.append(finding("WARN", host, "config", "vcpu_pin_set",
@@ -177,7 +159,7 @@ def check_nova_config(host: str, user: str) -> list[dict]:
     if dedicated and not isolated:
         rows.append(finding("CRITICAL", host, "config", "isolcpus",
                             f"cpu_dedicated_set={dedicated} but no isolcpus on the kernel "
-                            "command line — host processes will still schedule on those CPUs"))
+                            "command line, host processes will still schedule on those CPUs"))
     elif dedicated and isolated:
         rows.append(finding("INFO", host, "config", "isolcpus",
                             f"dedicated={dedicated}, isolated={isolated}"))
@@ -219,7 +201,7 @@ def check_instances(conn, host: str, user: str) -> list[dict]:
 
         if len(mem_nodes) > 1:
             rows.append(finding("WARN", host, "instances", srv.name,
-                                f"memory spans NUMA nodes {sorted(mem_nodes)} — "
+                                f"memory spans NUMA nodes {sorted(mem_nodes)}, "
                                 "cross-socket access on every miss"))
 
         extra_specs = (srv.flavor or {}).get("extra_specs", {}) or {}
@@ -230,7 +212,7 @@ def check_instances(conn, host: str, user: str) -> list[dict]:
 
         if pinned_cpus and "<emulatorpin" not in xml:
             rows.append(finding("WARN", host, "instances", srv.name,
-                                "vCPUs are pinned but emulator threads are not — "
+                                "vCPUs are pinned but emulator threads are not, "
                                 "QEMU I/O will interrupt the pinned cores"))
     return rows
 
@@ -275,7 +257,7 @@ def check_nic_locality(host: str, user: str) -> list[dict]:
         interface, node = parts[0], parts[1]
         if node == "-1":
             rows.append(finding("WARN", host, "nic", interface,
-                                "NIC reports no NUMA affinity (-1) — the scheduler cannot "
+                                "NIC reports no NUMA affinity (-1); the scheduler cannot "
                                 "make a locality-aware placement"))
         else:
             rows.append(finding("INFO", host, "nic", interface, f"NUMA node {node}"))

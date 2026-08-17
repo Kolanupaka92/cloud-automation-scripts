@@ -4,7 +4,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Operator Nexus — Bare Metal Fleet Health\n\nRack-level readiness, machine state and maintenance audit trail for a Nexus instance.\n\nUse the **Rack** filter to scope to a maintenance window. The *Maintenance readiness* tile is the GO/NO-GO gate: a rack must retain at least the configured number of healthy machines before another is taken down."
+        "json": "## Operator Nexus, Bare Metal Fleet Health\n\nRack-level readiness, machine state and maintenance audit trail for a Nexus instance.\n\nUse the **Rack** filter to scope to a maintenance window. The *Maintenance readiness* tile is the GO/NO-GO gate: a rack must retain at least the configured number of healthy machines before another is taken down."
       },
       "name": "header"
     },
@@ -190,7 +190,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let bmm =\n    AzureDiagnostics\n    | where ResourceType == \"BAREMETALMACHINES\"\n    | summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n    | project MachineName,\n              KubernetesNode = tostring(properties_kubernetesNodeName_s),\n              RackId = tostring(properties_rackId_s),\n              PowerState = tostring(properties_powerState_s),\n              BmmReady = tostring(properties_readyState_s);\nKubeNodeInventory\n| summarize arg_max(TimeGenerated, *) by Computer\n| project KubernetesNode = Computer, NodeStatus = Status, LastSeen = TimeGenerated\n| join kind=leftouter bmm on KubernetesNode\n| where '*' in ({Rack}) or RackId in ({Rack})\n| extend Diagnosis = case(\n      NodeStatus != \"Ready\" and PowerState == \"Off\", \"expected — BMM powered off\",\n      NodeStatus != \"Ready\" and BmmReady != \"True\",  \"BMM also unhealthy — hardware first\",\n      NodeStatus != \"Ready\",                          \"BMM healthy — investigate kubelet/CNI\",\n      \"healthy\")\n| where NodeStatus != \"Ready\"\n| project LastSeen, KubernetesNode, NodeStatus, Machine = MachineName, Rack = RackId, Power = PowerState, Diagnosis\n| order by Rack asc",
+        "query": "let bmm =\n    AzureDiagnostics\n    | where ResourceType == \"BAREMETALMACHINES\"\n    | summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n    | project MachineName,\n              KubernetesNode = tostring(properties_kubernetesNodeName_s),\n              RackId = tostring(properties_rackId_s),\n              PowerState = tostring(properties_powerState_s),\n              BmmReady = tostring(properties_readyState_s);\nKubeNodeInventory\n| summarize arg_max(TimeGenerated, *) by Computer\n| project KubernetesNode = Computer, NodeStatus = Status, LastSeen = TimeGenerated\n| join kind=leftouter bmm on KubernetesNode\n| where '*' in ({Rack}) or RackId in ({Rack})\n| extend Diagnosis = case(\n      NodeStatus != \"Ready\" and PowerState == \"Off\", \"expected, BMM powered off\",\n      NodeStatus != \"Ready\" and BmmReady != \"True\",  \"BMM also unhealthy, hardware first\",\n      NodeStatus != \"Ready\",                          \"BMM healthy, investigate kubelet/CNI\",\n      \"healthy\")\n| where NodeStatus != \"Ready\"\n| project LastSeen, KubernetesNode, NodeStatus, Machine = MachineName, Rack = RackId, Power = PowerState, Diagnosis\n| order by Rack asc",
         "size": 0,
         "timeContextFromParameter": "TimeRange",
         "queryType": 0,

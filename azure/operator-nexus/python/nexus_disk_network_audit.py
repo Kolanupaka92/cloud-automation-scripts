@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
-"""Disk and network health audit for Operator Nexus bare metal machines.
+"""Disk and network health for Nexus bare metal machines.
 
-Two sources are combined so the report reflects both what the platform believes
-and what the hardware reports:
+Combines the control-plane view (appliance state, detailedStatus, hardware
+validation) with on-machine output from begin_run_read_commands, which is the
+only sanctioned way to look inside a BMM. The platform only accepts allow-
+listed read commands, so this cannot change anything.
 
-  * Control-plane view — storage appliance state and capacity, BMM detailed
-    status, hardware validation results.
-  * On-machine view — read-only commands executed through the Network Cloud RP
-    (``begin_run_read_commands``), which is the only sanctioned way to inspect a
-    BMM without an SSH path into the rack. Only allow-listed read commands are
-    accepted by the platform, so this cannot mutate a machine.
+Parses out failed and degraded drives, SMART pre-failure, filesystem
+pressure, interface and bond state, error and drop counters, MTU mismatches.
 
-Checks
-------
-    disk     failed/degraded physical drives, RAID/virtual disk state, SMART
-             pre-failure indicators, filesystem utilisation on the host
-    network  interface link state and speed, bond/LACP member health, dropped
-             and errored packet counters, MTU consistency
-    storage  Nexus storage appliance status and remaining capacity
-
-Output is designed to paste straight into a maintenance ticket.
-
-Examples
---------
     ./nexus_disk_network_audit.py --rack rack-03
-    ./nexus_disk_network_audit.py --machine bmm-r03-s04 --check disk --format json
-    ./nexus_disk_network_audit.py --control-plane-only    # no on-machine commands
+    ./nexus_disk_network_audit.py --machine bmm-r03-s04 --control-plane-only
 """
 
 from __future__ import annotations
@@ -75,7 +60,7 @@ def finding(severity, machine, rack, check, subject, text) -> dict:
 
 
 def audit_control_plane(machine) -> list[dict]:
-    """Everything derivable from the BMM resource itself — always available."""
+    """Everything derivable from the BMM resource itself, always available."""
     name = machine_name(machine)
     rack = rack_name(machine)
     rows = []
@@ -112,7 +97,7 @@ def audit_control_plane(machine) -> list[dict]:
     if text(prop(machine, "cordon_status", "Uncordoned")) != "Uncordoned":
         rows.append(finding(
             "WARN", name, rack, "platform", "cordonStatus",
-            "machine is cordoned — check whether a maintenance window was left open",
+            "machine is cordoned, check whether a maintenance window was left open",
         ))
     return rows
 

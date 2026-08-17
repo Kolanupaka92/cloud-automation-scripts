@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
-"""Recommend VM rightsizing from 30 days of Azure Monitor metrics.
+"""VM rightsizing from 30 days of Azure Monitor metrics.
 
-Pulls per-VM CPU and memory utilisation, applies a percentile rule rather than
-an average (averages hide the peaks that make downsizing dangerous), and emits
-a recommendation with the estimated monthly saving.
+Uses p95 rather than averages, because an average hides the peak that makes a
+downsize a bad idea. Produces IDLE / DOWNSIZE / UPSIZE / OK with an estimated
+monthly saving.
 
-Rules
------
-    IDLE        p95 CPU < --idle-cpu and no network traffic -> candidate for
-                deallocation
-    DOWNSIZE    p95 CPU < --low-cpu and p95 memory < --low-mem -> one size down
-    UPSIZE      p95 CPU > --high-cpu or p95 memory > --high-mem -> one size up
-    OK          everything else
+Reports only. Resizing needs a reboot, so it belongs in a window and in a
+change record.
 
-Nothing is resized by this script — it produces the evidence for a change
-request. Sizing changes require a reboot and belong in a maintenance window.
-
-Examples
---------
-    ./vm_rightsizing.py --all-subscriptions --days 30
-    ./vm_rightsizing.py --resource-group prod-apps --format json
-    ./vm_rightsizing.py --recommendation DOWNSIZE
+Prices are a rough built-in table; swap in your own rates for real numbers.
 """
 
 from __future__ import annotations
@@ -73,8 +61,8 @@ SIZE_LADDER = {
 }
 SIZE_LADDER_DOWN = {larger: smaller for smaller, larger in SIZE_LADDER.items()}
 
-# Rough on-demand USD/month, Linux, pay-as-you-go. Replace with your own
-# negotiated rates or the retail price API for exact numbers.
+# Rough on-demand USD/month, Linux, PAYG. Nowhere near your actual bill if you
+# have an EA or reservations. Fine for ranking candidates, not for finance.
 SIZE_PRICES = {
     "Standard_D2s_v5": 70.0,
     "Standard_D4s_v5": 140.0,
@@ -237,7 +225,7 @@ def main() -> int:
         total = round(sum(r["est_saving_usd_mo"] for r in rows), 2)
         print(f"Estimated saving if every recommendation is applied: "
               f"${total}/month (${round(total * 12, 2)}/year)")
-        print("Sizing changes require a reboot — schedule them in a maintenance window.")
+        print("Sizing changes require a reboot, schedule them in a maintenance window.")
     return 0
 
 

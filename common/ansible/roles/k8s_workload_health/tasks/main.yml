@@ -1,7 +1,7 @@
 ---
-# Read-only Kubernetes health assessment. Never restarts or deletes anything —
-# recovery lives in the dedicated restart/recovery playbooks so that a health
-# check can be run safely during an active incident.
+# Read-only Kubernetes health assessment. Never restarts or deletes anything.
+# Recovery lives in the dedicated restart playbooks so this stays safe to run
+# during an active incident.
 
 - name: Reset findings for this run
   ansible.builtin.set_fact:

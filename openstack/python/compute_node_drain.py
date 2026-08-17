@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-"""Safely drain a Nova compute node ahead of maintenance.
+"""Drain a compute node before maintenance.
 
-This is the script that turns "take host X down for a firmware update" from an
-hour of careful clicking into a repeatable, auditable operation:
+Checks there is somewhere for the instances to go, disables nova-compute with
+a reason attached, then live-migrates one instance at a time, waiting for each
+to land before starting the next. Anything it cannot move is reported rather
+than forced.
 
-  1. Pre-flight: host exists, nova-compute is up, instances are in a movable
-     state, and enough capacity exists elsewhere in the same aggregate.
-  2. Disable the nova-compute service so the scheduler stops placing new
-     instances on it (recorded with a reason so the next operator knows why).
-  3. Live-migrate instances one at a time, polling each to completion before
-     starting the next, so a bad migration cannot cascade.
-  4. Report anything left behind — shelved, errored, or pinned instances that
-     need a human decision.
-
-Nothing is ever force-migrated and nothing is ever deleted.
-
-Examples
---------
     ./compute_node_drain.py --host compute-042 --dry-run
     ./compute_node_drain.py --host compute-042 --reason "CHG0041827 firmware"
-    ./compute_node_drain.py --host compute-042 --undrain   # re-enable after work
+    ./compute_node_drain.py --host compute-042 --undrain
 """
 
 from __future__ import annotations
@@ -93,7 +82,7 @@ def capacity_available(conn, host: str, rows: list[dict]) -> bool:
         needed_vcpu += flavor.vcpus or 0
         needed_mem += flavor.ram or 0
 
-    # Capacity comes from Placement where available — the hypervisor API stopped
+    # Capacity comes from Placement where available; the hypervisor API stopped
     # reporting these numbers at Nova 2.88, and a zero here would wave through a
     # drain the region cannot actually absorb.
     hypervisors = [

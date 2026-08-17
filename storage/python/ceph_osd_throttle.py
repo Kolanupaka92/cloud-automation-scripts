@@ -1,41 +1,19 @@
 #!/usr/bin/env python3
-"""Tune Ceph OSD recovery and backfill throttles for the situation at hand.
+"""Set Ceph recovery and backfill throttles from a named profile.
 
-Recovery throttles are the classic false economy. Leave the defaults during a
-large backfill and client latency collapses; leave them turned down after the
-incident and the cluster stays degraded for days. Both failure modes are
-routine, and both are avoidable by setting the throttle deliberately and
-recording why.
+    emergency     client IO already suffering, recover as slowly as possible
+    conservative  business hours, protect client latency
+    balanced      the sensible default
+    aggressive    maintenance window, no tenant load, drain the backfill queue
+    default       Ceph's shipped values
 
-Profiles
---------
-    emergency   client I/O is already suffering; recover as slowly as possible
-    conservative  business hours — protect client latency, accept slow recovery
-    balanced    the sensible default outside a window
-    aggressive  maintenance window, no tenant load, drain the backfill queue
-    default     restore Ceph's shipped values
+Writes a restore point before changing anything, so --restore puts the cluster
+back exactly as it was. Refuses to raise throttles while the cluster is
+unhealthy unless --force.
 
-Applied settings (per profile):
-    osd_max_backfills, osd_recovery_max_active, osd_recovery_op_priority,
-    osd_recovery_sleep_hdd/ssd, osd_scrub_during_recovery
-
-Safety
-------
-  * Refuses to raise throttles while the cluster is not HEALTH_OK unless
-    --force is given, because turning recovery up during an outage is how a
-    slow cluster becomes an unavailable one.
-  * Records the current values before changing anything and writes them to a
-    restore file, so `--restore` puts the cluster back exactly as it was.
-  * `--watch` reports recovery throughput and client latency after applying, so
-    the effect is visible rather than assumed.
-
-Examples
---------
     ./ceph_osd_throttle.py --show
-    ./ceph_osd_throttle.py --profile conservative --dry-run
     ./ceph_osd_throttle.py --profile aggressive --reason "CHG0041827 rack drain"
     ./ceph_osd_throttle.py --restore state/ceph-throttle-20260817.json
-    ./ceph_osd_throttle.py --watch 300
 """
 
 from __future__ import annotations

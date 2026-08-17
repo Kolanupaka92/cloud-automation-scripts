@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
-"""Reconcile Nova's view of a compute node against what libvirt is actually running.
+"""Reconcile Nova against libvirt on a compute node.
 
-Long-lived compute nodes drift out of sync with the Nova database. The two
-directions are very different problems, so the script names them separately:
+Three things turn up, and they are not the same problem:
 
-    ORPHAN_DOMAIN     libvirt is running a domain Nova has no record of, or has
-                      recorded as deleted. It consumes real CPU, RAM and disk
-                      that the scheduler believes is free — this is the one that
-                      silently overcommits a host until it falls over.
+    ORPHAN_DOMAIN       libvirt is running something Nova has no record of, or
+                        recorded as deleted. Eats capacity the scheduler
+                        thinks is free.
+    MISSING_DOMAIN      Nova says ACTIVE, no domain exists. The VM is gone and
+                        nothing has noticed.
+    STALE_INSTANCE_DIR  leftover directory under /var/lib/nova/instances.
 
-    MISSING_DOMAIN    Nova believes an instance is ACTIVE on this host but no
-                      libvirt domain exists. The tenant's VM is gone; Nova will
-                      keep reporting it as healthy until someone looks.
-
-    STALE_INSTANCE_DIR  /var/lib/nova/instances holds a directory for an instance
-                      that no longer exists anywhere. Pure wasted disk.
-
-Cleanup is opt-in, one class at a time, and refuses to touch anything whose
-state it cannot fully confirm from both sides.
-
-The libvirt and filesystem views are collected over SSH, so this runs from an
-operator workstation against any compute node without an agent.
-
-Examples
---------
-    ./orphaned_instance_cleanup.py --host compute-042
-    ./orphaned_instance_cleanup.py --all-hosts --format json
-    ./orphaned_instance_cleanup.py --host compute-042 --clean orphan-domains --dry-run
-    ./orphaned_instance_cleanup.py --host compute-042 --clean stale-dirs --yes
+Cleanup is opt-in per class. MISSING_DOMAIN is never cleaned up; it needs a
+person.
 """
 
 from __future__ import annotations
@@ -101,7 +85,7 @@ def nova_instances(conn, host: str) -> dict[str, object]:
         for srv in conn.compute.servers(all_projects=True, details=True, host=host)
     }
     # Deleted instances still explain a leftover domain or directory, so fetch
-    # them too — this is what distinguishes "never existed" from "not cleaned up".
+    # them too; this is what distinguishes "never existed" from "not cleaned up".
     try:
         for srv in conn.compute.servers(
             all_projects=True, details=True, host=host, deleted=True
@@ -140,7 +124,7 @@ def reconcile(conn, host: str, user: str) -> list[dict]:
                 "name": domain,
                 "nova_state": "absent",
                 "libvirt_state": domains[domain],
-                "detail": "libvirt domain has no Nova instance — consuming untracked capacity",
+                "detail": "libvirt domain has no Nova instance, consuming untracked capacity",
                 "_domain": domain,
             })
         elif getattr(server, "status", "").upper() == "DELETED":
@@ -196,7 +180,7 @@ def disk_usage(host: str, user: str, uuid: str) -> str:
 
 
 def clean(rows: list[dict], user: str, target: str, dry_run: bool, assume_yes: bool) -> int:
-    """Remove one class of finding. Never touches MISSING_DOMAIN — that is a
+    """Remove one class of finding. Never touches MISSING_DOMAIN; that is a
     tenant-visible outage needing investigation, not cleanup."""
     if target == "orphan-domains":
         selected = [r for r in rows if r["finding"] == "ORPHAN_DOMAIN"]
@@ -306,7 +290,7 @@ def main() -> int:
         print("Summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
         if counts.get("MISSING_DOMAIN"):
             print(
-                "\nMISSING_DOMAIN is a tenant-visible outage, not cleanup — "
+                "\nMISSING_DOMAIN is a tenant-visible outage, not cleanup, "
                 "investigate before doing anything else."
             )
 

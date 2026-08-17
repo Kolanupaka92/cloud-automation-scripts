@@ -45,7 +45,7 @@ jobs:
 
       - name: Install the real SDKs
         # The tests build genuine openstacksdk and azure-mgmt model objects, so
-        # they fail when an SDK renames a field or changes model shape — the
+        # they fail when an SDK renames a field or changes model shape; the
         # breakage that otherwise shows up as an empty report against a live
         # cloud rather than as a test failure here.
         run: |
@@ -82,7 +82,7 @@ jobs:
           set -e
           # Each playbook directory carries its own ansible.cfg (roles_path for
           # the shared role, inventory defaults), and ansible only reads the
-          # cfg in the working directory — so check each one from its own
+          # cfg in the working directory; so check each one from its own
           # directory, exactly as these are run in practice.
           repo="$PWD"
           for dir in openstack/ansible azure/ansible azure/operator-nexus/ansible \

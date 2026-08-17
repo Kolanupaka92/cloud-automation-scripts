@@ -1,36 +1,24 @@
-"""Airflow DAG orchestrating a wave of compute node migrations.
+"""Airflow DAG for a wave of compute node migrations.
 
-A migration wave is dozens of hosts moved over weeks, by different people, with
-different maintenance windows. Driving that from a laptop does not scale and
-leaves no audit trail. This DAG turns it into scheduled, observable, resumable
-work:
+A wave is dozens of hosts over several weeks, different people, different
+windows. Driving that from a laptop does not scale and leaves no audit trail.
 
-  * One task group per host, expanded dynamically from the wave definition, so
-    adding a host to the wave is a config change rather than a DAG change.
-  * A pool caps how many hosts drain concurrently, enforcing the same "never
-    take too much capacity out at once" rule the CLI scripts enforce locally.
-  * Every stage is a separate task, so a failure is retried from that stage
-    rather than restarting the whole host.
-  * A region-wide pre-flight gate runs first and short-circuits the entire wave
-    if the cloud is not healthy — no point draining a host into a region that
-    cannot absorb it.
-  * The final task refuses to report success unless every host either completed
-    or was explicitly skipped.
+One task group per host, a pool capping concurrent drains, per-stage retries
+so a failure resumes from that stage rather than the whole host, and a
+region-wide gate that short-circuits the wave if the cloud is unhealthy.
 
-The DAG shells out to the same scripts in this repository that an operator runs
-by hand, so there is exactly one implementation of the migration logic and the
-manual and automated paths cannot drift apart.
+It shells out to the same scripts in this repo that get run by hand, so there
+is one implementation of the migration logic and the two paths cannot drift.
 
-Configuration lives in an Airflow Variable named `compute_migration_wave`:
+Config lives in an Airflow Variable named compute_migration_wave:
 
     {
       "wave": "wave-3",
       "change_id": "CHG0041827",
       "cloud": "dfw-prod",
-      "hosts": ["compute-041", "compute-042", "compute-043"],
+      "hosts": ["compute-041", "compute-042"],
       "target_aggregate": "yoga-upgraded",
-      "max_parallel_drains": 2,
-      "skip_capacity_check": false
+      "max_parallel_drains": 2
     }
 """
 

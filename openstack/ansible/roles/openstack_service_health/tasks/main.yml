@@ -1,6 +1,6 @@
 ---
 # Read-only health sweep of an OpenStack region. Safe to run at any time,
-# including during an active incident — it never restarts or changes anything.
+# including during an active incident; it never restarts or changes anything.
 
 - name: Select the service list for this host's role
   ansible.builtin.set_fact:

@@ -50,7 +50,7 @@
       ansible.builtin.assert:
         that: change_id != 'unspecified'
         fail_msg: >-
-          Pass -e change_id=CHG####### — a policy change takes effect cluster-wide
+          Pass -e change_id=CHG#######, a policy change takes effect cluster-wide
           the moment it is applied.
       when: not (allow_unticketed | default(false) | bool)
 
@@ -286,7 +286,7 @@
         - name: Fail the run after rolling back
           ansible.builtin.fail:
             msg: >-
-              {{ change_id }}: policy change rolled back — DNS resolution broke.
+              {{ change_id }}: policy change rolled back, DNS resolution broke.
               Review the policy set before retrying.
 
     - name: Summarise

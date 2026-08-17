@@ -14,7 +14,7 @@ Conventions shared by all Nexus scripts:
     --format table|json                 output format
 
 Read operations need Reader on the cluster resource group. Power and cordon
-operations need a role that grants the Network Cloud action set — typically a
+operations need a role that grants the Network Cloud action set, typically a
 custom "Nexus Maintenance Operator" role rather than a broad Contributor grant.
 """
 
@@ -132,7 +132,7 @@ def prop(resource, name: str, default=None):
     azure-mgmt-networkcloud 3.x nests every field under ``resource.properties``;
     1.x and 2.x expose them flat on the resource. Reading through this accessor
     means the scripts work with whichever version a site has pinned, instead of
-    breaking silently on upgrade — every field would simply read as None.
+    breaking silently on upgrade; every field would simply read as None.
     """
     properties = getattr(resource, "properties", None)
     if properties is not None and hasattr(properties, name):
@@ -149,7 +149,7 @@ def text(value, default: str = "") -> str:
     The Network Cloud models return ``str``-mixin enums, and ``str(enum)`` gives
     "BareMetalMachineReadyState.TRUE" rather than "True" on modern Python. The
     same field arrives as a bare string from other code paths, so every
-    comparison goes through here — otherwise a healthy machine reads as
+    comparison goes through here; otherwise a healthy machine reads as
     unhealthy and a maintenance window refuses to start for no reason.
     """
     if value is None:
@@ -219,8 +219,8 @@ def run_read_commands(nc, resource_group: str, name: str, commands, timeout: int
     """Execute allow-listed read-only commands on a BMM via the Nexus RP.
 
     Only commands on the Operator Nexus read-only allow list are accepted by the
-    platform; anything mutating is rejected server-side, which is exactly the
-    guarantee we want for a health check.
+    platform. Anything mutating is rejected server-side, so a health check
+    cannot accidentally change a machine.
     """
     from azure.mgmt.networkcloud.models import (
         BareMetalMachineCommandSpecification,

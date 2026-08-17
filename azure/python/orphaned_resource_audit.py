@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
-"""Find (and optionally delete) unused Azure resources that still cost money.
+"""Unused Azure resources that are still being billed.
 
-The five that dominate the waste line on almost every enterprise bill:
+Unattached managed disks, public IPs with no association, NICs on no VM,
+snapshots past --age-days, and NSGs attached to nothing. Costs are estimated
+from a built-in rate table, so the numbers are indicative rather than exact.
 
-    disks          managed disks in state Unattached
-    public-ips     public IPs with no NIC, load balancer, or gateway attached
-    nics           network interfaces attached to no VM
-    snapshots      disk snapshots older than --age-days
-    nsgs           network security groups attached to no subnet or NIC
+Deletion skips anything tagged DoNotDelete and confirms first.
 
-Estimated monthly cost uses the retail price list when it is reachable and a
-conservative built-in fallback when it is not, so the report is useful even
-from a restricted network.
-
-Deletion is opt-in, confirms first, and always skips resources tagged
-DoNotDelete.
-
-Examples
---------
     ./orphaned_resource_audit.py --all-subscriptions
     ./orphaned_resource_audit.py --check disks --age-days 60
-    ./orphaned_resource_audit.py --check public-ips --delete --dry-run
 """
 
 from __future__ import annotations

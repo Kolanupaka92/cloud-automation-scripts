@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""Nova capacity and overcommit report across every compute node in a region.
+"""Nova capacity and overcommit per compute node.
 
-Answers the two questions that come up in every capacity review:
+Numbers come from Placement so they match what the scheduler actually sees.
+With --flavor it also works out how many more of that flavor will fit.
 
-  1. Which hypervisors are close to exhausting vCPU / RAM / disk?
-  2. How many more instances of flavor X can this region actually place?
-
-Placement's allocation ratios are read from the Placement API when available so
-the numbers match what the scheduler believes, rather than raw hardware totals.
-
-Examples
---------
     ./hypervisor_capacity_report.py --threshold 85
     ./hypervisor_capacity_report.py --flavor m1.large --format json
-    ./hypervisor_capacity_report.py --aggregate gpu-nodes --sort mem_pct
 """
 
 from __future__ import annotations

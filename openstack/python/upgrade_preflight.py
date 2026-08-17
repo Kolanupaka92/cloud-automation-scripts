@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
-"""Pre-upgrade validation gate for an OpenStack region.
+"""Pre-upgrade checks for a region. Run before every window.
 
-Run this before every maintenance window. It fails loudly on the conditions
-that historically turn a routine upgrade into an incident:
+Covers service and agent liveness, nova-compute version skew, instances and
+volumes stuck mid-transition, migrations left in flight, projects near a quota
+limit, and whether there is capacity to drain --evacuate-hosts at once.
 
-    services          any nova/cinder/neutron service or agent that is down
-    version-skew      compute nodes not all on the same service version
-    stuck-instances   VMs in a transitional or ERROR state that will not survive
-                      a control-plane restart cleanly
-    stuck-volumes     volumes stuck in creating/attaching/detaching/error
-    orphan-migrations migrations left in a non-terminal state
-    quota-headroom    projects at >= --quota-threshold of any quota, which turn
-                      post-upgrade retries into hard failures
-    capacity          not enough free capacity to evacuate --evacuate-hosts
-                      hosts concurrently during a rolling upgrade
-
-Exit codes: 0 clean, 1 warnings only, 2 blocking failures.
-
-Examples
---------
-    ./upgrade_preflight.py
-    ./upgrade_preflight.py --evacuate-hosts 3 --format json
-    ./upgrade_preflight.py --skip quota-headroom
+Exit 0 clean, 1 warnings, 2 blocking.
 """
 
 from __future__ import annotations
