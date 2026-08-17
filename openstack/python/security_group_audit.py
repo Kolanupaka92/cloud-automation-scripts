@@ -67,7 +67,7 @@ def port_range(rule) -> str:
 def covered_admin_ports(rule) -> list[str]:
     lo, hi = rule.port_range_min, rule.port_range_max
     if lo is None and hi is None:
-        return sorted({name for name in ADMIN_PORTS.values()})
+        return sorted(set(ADMIN_PORTS.values()))
     return [ADMIN_PORTS[p] for p in ADMIN_PORTS if lo <= p <= hi]
 
 

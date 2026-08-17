@@ -21,7 +21,8 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Iterator, Sequence
+from collections.abc import Iterator, Sequence
+from typing import Any
 
 try:
     from azure.core.exceptions import ClientAuthenticationError, HttpResponseError

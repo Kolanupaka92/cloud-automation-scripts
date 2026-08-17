@@ -54,13 +54,17 @@ jobs:
       - name: Syntax-check every playbook
         run: |
           set -e
-          for playbook in \
-            openstack/ansible/*.yml \
-            azure/ansible/*.yml \
-            azure/operator-nexus/ansible/*.yml
-          do
-            echo "==> $playbook"
-            ansible-playbook --syntax-check -i localhost, "$playbook" || exit 1
+          # Each playbook directory carries its own ansible.cfg (roles_path for
+          # the shared role, inventory defaults), and ansible only reads the
+          # cfg in the working directory — so check each one from its own
+          # directory, exactly as these are run in practice.
+          repo="$PWD"
+          for dir in openstack/ansible azure/ansible azure/operator-nexus/ansible; do
+            cd "$repo/$dir"
+            for playbook in *.yml; do
+              echo "==> $dir/$playbook"
+              ansible-playbook --syntax-check -i localhost, "$playbook"
+            done
           done
 
       - name: ansible-lint

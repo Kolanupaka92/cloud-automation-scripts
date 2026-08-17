@@ -25,7 +25,8 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 try:
     from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
