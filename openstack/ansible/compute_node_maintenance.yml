@@ -1,0 +1,164 @@
+---
+# End-to-end maintenance of a Nova compute node: drain, patch, reboot, verify,
+# return to service. Designed to be driven one host (or one small batch) at a
+# time from a change record.
+#
+#   ansible-playbook compute_node_maintenance.yml -l compute-042 \
+#       -e change_id=CHG0041827 --check
+#   ansible-playbook compute_node_maintenance.yml -l compute-042 \
+#       -e change_id=CHG0041827 -e reboot_required=true
+#
+# The drain itself reuses ../python/compute_node_drain.py so the migration
+# logic lives in exactly one place.
+
+- name: Compute node maintenance
+  hosts: computes
+  gather_facts: true
+  become: true
+  serial: "{{ maintenance_batch_size | default(1) }}"
+  max_fail_percentage: 0
+  vars:
+    change_id: "unspecified"
+    reboot_required: false
+    reboot_timeout: 900
+    drain_script: "{{ playbook_dir }}/../python/compute_node_drain.py"
+    os_cloud: "{{ lookup('env', 'OS_CLOUD') | default('envvars', true) }}"
+    post_reboot_settle_seconds: 60
+
+  pre_tasks:
+    - name: Refuse to run without a change record in production
+      ansible.builtin.assert:
+        that: change_id != 'unspecified'
+        fail_msg: "Pass -e change_id=CHG####### so the drain reason is auditable."
+      when: not (allow_unticketed | default(false) | bool)
+
+    - name: Record the pre-maintenance instance count
+      ansible.builtin.command: virsh list --name --state-running
+      register: pre_domains
+      changed_when: false
+
+    - name: Show what is running on this host
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} is running
+          {{ pre_domains.stdout_lines | reject('equalto', '') | list | length }} domain(s)
+
+  tasks:
+    - name: Drain the compute node
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ drain_script }}"
+          - "--cloud={{ os_cloud }}"
+          - "--host={{ inventory_hostname }}"
+          - "--reason={{ change_id }} planned maintenance"
+          - "--yes"
+      delegate_to: localhost
+      become: false
+      register: drain_result
+      changed_when: drain_result.rc == 0
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: Preview the drain in check mode
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ drain_script }}"
+          - "--cloud={{ os_cloud }}"
+          - "--host={{ inventory_hostname }}"
+          - "--dry-run"
+      delegate_to: localhost
+      become: false
+      register: drain_preview
+      changed_when: false
+      check_mode: false
+      when: ansible_check_mode
+
+    - name: Confirm no domains remain
+      ansible.builtin.command: virsh list --name --state-running
+      register: post_drain_domains
+      changed_when: false
+      failed_when: post_drain_domains.stdout_lines | reject('equalto', '') | list | length > 0
+      when: not ansible_check_mode
+
+    - name: Stop nova-compute before patching
+      ansible.builtin.systemd:
+        name: openstack-nova-compute
+        state: stopped
+      when: not ansible_check_mode
+
+    - name: Apply operating system updates
+      ansible.builtin.package:
+        name: "*"
+        state: latest        # noqa package-latest - patching is the point here
+      register: patching
+      notify: Flag reboot needed
+
+    - name: Detect whether the kernel changed
+      ansible.builtin.command: needs-restarting -r
+      register: needs_restarting
+      changed_when: false
+      failed_when: false
+
+    - name: Reboot the node
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        post_reboot_delay: "{{ post_reboot_settle_seconds }}"
+        msg: "{{ change_id }} compute maintenance"
+      when:
+        - not ansible_check_mode
+        - (reboot_required | bool) or (needs_restarting.rc | default(0)) == 1
+
+    - name: Wait for libvirt to come back
+      ansible.builtin.command: virsh list --all --name
+      register: virsh_post
+      until: virsh_post.rc == 0
+      retries: 20
+      delay: 15
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Start nova-compute
+      ansible.builtin.systemd:
+        name: openstack-nova-compute
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+
+    - name: Wait for the OVS agent to report healthy
+      ansible.builtin.command: ovs-vsctl show
+      register: ovs_post
+      until: ovs_post.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+      when: not ansible_check_mode
+
+  post_tasks:
+    - name: Return the node to the scheduler
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ drain_script }}"
+          - "--cloud={{ os_cloud }}"
+          - "--host={{ inventory_hostname }}"
+          - "--undrain"
+      delegate_to: localhost
+      become: false
+      register: undrain_result
+      changed_when: undrain_result.rc == 0
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: Record the outcome
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} maintenance complete for {{ change_id }};
+          packages changed: {{ patching.changed | default(false) }};
+          rebooted: {{ (reboot_required | bool) or (needs_restarting.rc | default(0)) == 1 }}
+
+  handlers:
+    - name: Flag reboot needed
+      ansible.builtin.set_fact:
+        reboot_required: true

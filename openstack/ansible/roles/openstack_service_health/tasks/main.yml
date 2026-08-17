@@ -1,0 +1,138 @@
+---
+# Read-only health sweep of an OpenStack region. Safe to run at any time,
+# including during an active incident — it never restarts or changes anything.
+
+- name: Select the service list for this host's role
+  ansible.builtin.set_fact:
+    _expected_services: >-
+      {{
+        (health_controller_services if 'controllers' in group_names else [])
+        + (health_compute_services if 'computes' in group_names else [])
+        + (health_network_services if 'network' in group_names else [])
+      }}
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Build the down-service list
+  ansible.builtin.set_fact:
+    _services_down: "{{ _services_down | default([]) + [item] }}"
+  loop: "{{ _expected_services }}"
+  when:
+    - item in ansible_facts.services
+    - ansible_facts.services[item].state != 'running'
+  loop_control:
+    label: "{{ item }}"
+
+- name: Build the missing-service list
+  ansible.builtin.set_fact:
+    _services_missing: "{{ _services_missing | default([]) + [item] }}"
+  loop: "{{ _expected_services }}"
+  when: item not in ansible_facts.services
+  loop_control:
+    label: "{{ item }}"
+
+- name: Flag filesystems above the warning threshold
+  ansible.builtin.set_fact:
+    _disk_alerts: >-
+      {{ _disk_alerts | default([]) + [{
+           'mount': item.mount,
+           'used_pct': _used_pct | round(1),
+           'severity': 'FAIL' if _used_pct >= health_disk_fail_pct | float else 'WARN'
+         }] }}
+  vars:
+    _used_pct: "{{ 100 - (item.size_available / item.size_total * 100) }}"
+  loop: "{{ ansible_facts.mounts | rejectattr('size_total', 'eq', 0) | list }}"
+  when:
+    - not item.mount is match('^/(proc|sys|run|dev)')
+    - (100 - (item.size_available / item.size_total * 100)) >= health_disk_warn_pct | float
+  loop_control:
+    label: "{{ item.mount }}"
+
+- name: Check RabbitMQ cluster status
+  ansible.builtin.command: rabbitmqctl cluster_status --formatter json
+  register: _rabbit
+  changed_when: false
+  failed_when: false
+  when: "'controllers' in group_names"
+
+- name: Measure total queued messages
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    rabbitmqctl list_queues messages --formatter json
+    | python3 -c 'import json,sys; print(sum(q["messages"] for q in json.load(sys.stdin)))'
+  args:
+    executable: /bin/bash
+  register: _rabbit_depth
+  changed_when: false
+  failed_when: false
+  when: "'controllers' in group_names"
+
+- name: Check Galera cluster size
+  ansible.builtin.command: >-
+    mysql --defaults-file={{ health_galera_defaults_file }} -N -B
+    -e "SHOW STATUS LIKE 'wsrep_cluster_size'"
+  register: _galera
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: "'controllers' in group_names"
+
+- name: Check that libvirt can list domains
+  ansible.builtin.command: virsh list --all --name
+  register: _virsh
+  changed_when: false
+  failed_when: false
+  when: "'computes' in group_names"
+
+- name: Check OVS bridge health
+  ansible.builtin.command: ovs-vsctl show
+  register: _ovs
+  changed_when: false
+  failed_when: false
+  when: "'computes' in group_names or 'network' in group_names"
+
+- name: Assemble this host's health record
+  ansible.builtin.set_fact:
+    host_health:
+      host: "{{ inventory_hostname }}"
+      groups: "{{ group_names }}"
+      services_down: "{{ _services_down | default([]) }}"
+      services_missing: "{{ _services_missing | default([]) }}"
+      disk_alerts: "{{ _disk_alerts | default([]) }}"
+      uptime_days: "{{ (ansible_facts.uptime_seconds | default(0) / 86400) | round(1) }}"
+      rabbit_ok: "{{ (_rabbit.rc | default(0)) == 0 }}"
+      rabbit_queue_depth: "{{ (_rabbit_depth.stdout | default('0')) | trim | int }}"
+      galera_cluster_size: "{{ ((_galera.stdout | default('')).split() | last | default('0', true)) | int }}"
+      libvirt_ok: "{{ (_virsh.rc | default(0)) == 0 }}"
+      ovs_ok: "{{ (_ovs.rc | default(0)) == 0 }}"
+
+- name: Collect the conditions that make this host unhealthy
+  ansible.builtin.set_fact:
+    host_health_problems: >-
+      {{
+        (host_health.services_down | map('regex_replace', '^', 'service down: ') | list)
+        + (host_health.services_missing | map('regex_replace', '^', 'service missing: ') | list)
+        + (host_health.disk_alerts
+           | selectattr('severity', 'eq', 'FAIL')
+           | map(attribute='mount')
+           | map('regex_replace', '^', 'disk critical: ')
+           | list)
+        + (['rabbitmq unreachable'] if ('controllers' in group_names and not host_health.rabbit_ok) else [])
+        + (['rabbitmq backlog ' ~ host_health.rabbit_queue_depth]
+           if (host_health.rabbit_queue_depth | int) > (health_rabbit_queue_warn | int) else [])
+        + (['galera cluster degraded: ' ~ host_health.galera_cluster_size]
+           if ('controllers' in group_names
+               and (host_health.galera_cluster_size | int) < (health_galera_min_cluster_size | int))
+           else [])
+        + (['libvirt not responding'] if ('computes' in group_names and not host_health.libvirt_ok) else [])
+        + (['ovs not responding']
+           if (('computes' in group_names or 'network' in group_names) and not host_health.ovs_ok) else [])
+      }}
+
+- name: Report per-host findings
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{ 'OK' if host_health_problems | length == 0
+         else 'ATTENTION -> ' ~ (host_health_problems | join('; ')) }}

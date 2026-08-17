@@ -1,0 +1,225 @@
+---
+# Quarterly bare metal maintenance for an Operator Nexus rack, end to end.
+#
+#   ansible-playbook nexus_quarterly_maintenance.yml \
+#       -e rack=rack-03 -e change_id=CHG0041827 --check
+#   ansible-playbook nexus_quarterly_maintenance.yml \
+#       -e rack=rack-03 -e change_id=CHG0041827 -e phase=shutdown
+#   ansible-playbook nexus_quarterly_maintenance.yml \
+#       -e rack=rack-03 -e change_id=CHG0041827 -e phase=restore
+#
+# The window in five stages:
+#
+#   1. Pre-flight   BMM fleet health, disk/network audit, Kubernetes health, and
+#                   an explicit GO/NO-GO on rack headroom. Any NO-GO stops here.
+#   2. Snapshot     Record the pre-maintenance state so the post-check can prove
+#                   nothing regressed rather than merely looking green.
+#   3. Shutdown     Cordon + power off, one machine at a time, journalled.
+#   4. Restore      Power on, wait Ready, uncordon, verify.
+#   5. Post-flight  Re-run every check and diff against the snapshot.
+#
+# Splitting shutdown and restore into separate phases lets the hardware team
+# hold the machines down for as long as the physical work needs.
+
+- name: Operator Nexus quarterly maintenance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    nexus_resource_group: "{{ lookup('env', 'NEXUS_RESOURCE_GROUP') }}"
+    phase: full
+    min_healthy_per_rack: 3
+    change_id: unspecified
+    report_dir: "{{ playbook_dir }}/reports"
+    state_dir: "{{ playbook_dir }}/state"
+    python_dir: "{{ playbook_dir }}/../python"
+    run_k8s_checks: true
+
+  tasks:
+    # ---------------------------------------------------------------- stage 1
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - rack is defined
+          - change_id != 'unspecified'
+          - nexus_resource_group | length > 0
+          - phase in ['full', 'shutdown', 'restore']
+        fail_msg: >-
+          Pass -e rack=<rack> -e change_id=CHG####### and set NEXUS_RESOURCE_GROUP.
+
+    - name: Ensure the report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Pre-flight — bare metal fleet health and maintenance readiness
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ python_dir }}/nexus_bmm_health.py"
+          - "--resource-group={{ nexus_resource_group }}"
+          - "--rack={{ rack }}"
+          - "--min-healthy-per-rack={{ min_healthy_per_rack }}"
+          - "--maintenance-readiness"
+      register: preflight_health
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the readiness verdict
+      ansible.builtin.debug:
+        var: preflight_health.stdout_lines
+
+    - name: Stop if the rack is not ready for maintenance
+      ansible.builtin.assert:
+        that: preflight_health.rc == 0
+        fail_msg: >-
+          NO-GO: rack {{ rack }} is not in a state to begin maintenance.
+          Resolve the blockers above, then re-run.
+        success_msg: "GO: rack {{ rack }} is ready for maintenance."
+      when: phase in ['full', 'shutdown']
+
+    - name: Pre-flight — disk and network audit
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ python_dir }}/nexus_disk_network_audit.py"
+          - "--resource-group={{ nexus_resource_group }}"
+          - "--rack={{ rack }}"
+          - "--min-severity=WARN"
+          - "--format=json"
+      register: preflight_audit
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Report pre-existing hardware findings
+      ansible.builtin.debug:
+        msg: >-
+          {{ (preflight_audit.stdout | from_json | default([])) | length }}
+          pre-existing hardware finding(s) — these are expected to still be
+          present afterwards and must not be mistaken for maintenance damage.
+      when: preflight_audit.stdout | default('') | length > 0
+
+    - name: Pre-flight — Kubernetes health
+      ansible.builtin.include_tasks: tasks/k8s_snapshot.yml
+      vars:
+        snapshot_label: pre
+      when: run_k8s_checks | bool
+
+    # ---------------------------------------------------------------- stage 2
+    - name: Snapshot the pre-maintenance state
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/{{ change_id }}-{{ rack }}-pre.json"
+        mode: "0640"
+        content: >-
+          {{ {
+               'change_id': change_id,
+               'rack': rack,
+               'phase': phase,
+               'captured_at': '%Y-%m-%dT%H:%M:%SZ' | strftime,
+               'readiness_rc': preflight_health.rc,
+               'hardware_findings': (preflight_audit.stdout | default('[]') | from_json),
+               'k8s_findings': (k8s_snapshot_pre | default([]))
+             } | to_nice_json }}
+
+    # ------------------------------------------------------------ stages 3/4
+    - name: Run the maintenance cycle
+      ansible.builtin.command:
+        argv: >-
+          {{ ['python3', python_dir ~ '/nexus_bmm_maintenance.py',
+              '--resource-group=' ~ nexus_resource_group,
+              '--rack=' ~ rack,
+              '--change=' ~ change_id,
+              '--phase=' ~ phase,
+              '--min-healthy-per-rack=' ~ min_healthy_per_rack,
+              '--state-dir=' ~ state_dir,
+              '--yes']
+             + (['--dry-run'] if ansible_check_mode else []) }}
+      register: maintenance
+      changed_when: maintenance.rc == 0 and not ansible_check_mode
+      failed_when: maintenance.rc != 0
+      check_mode: false
+
+    - name: Show the maintenance log
+      ansible.builtin.debug:
+        var: maintenance.stdout_lines
+
+    # ---------------------------------------------------------------- stage 5
+    - name: Post-flight — bare metal fleet health
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ python_dir }}/nexus_bmm_health.py"
+          - "--resource-group={{ nexus_resource_group }}"
+          - "--rack={{ rack }}"
+          - "--fail-on-findings"
+      register: postflight_health
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: phase in ['full', 'restore']
+
+    - name: Post-flight — disk and network audit
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ python_dir }}/nexus_disk_network_audit.py"
+          - "--resource-group={{ nexus_resource_group }}"
+          - "--rack={{ rack }}"
+          - "--min-severity=WARN"
+          - "--format=json"
+      register: postflight_audit
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: phase in ['full', 'restore']
+
+    - name: Post-flight — Kubernetes health
+      ansible.builtin.include_tasks: tasks/k8s_snapshot.yml
+      vars:
+        snapshot_label: post
+      when:
+        - run_k8s_checks | bool
+        - phase in ['full', 'restore']
+
+    - name: Identify findings introduced by the maintenance
+      ansible.builtin.set_fact:
+        new_hardware_findings: >-
+          {{ (postflight_audit.stdout | default('[]') | from_json)
+             | difference(preflight_audit.stdout | default('[]') | from_json) }}
+        new_k8s_findings: >-
+          {{ (k8s_snapshot_post | default([])) | difference(k8s_snapshot_pre | default([])) }}
+      when: phase in ['full', 'restore']
+
+    - name: Write the post-maintenance report
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/{{ change_id }}-{{ rack }}-post.json"
+        mode: "0640"
+        content: >-
+          {{ {
+               'change_id': change_id,
+               'rack': rack,
+               'phase': phase,
+               'captured_at': '%Y-%m-%dT%H:%M:%SZ' | strftime,
+               'fleet_health_rc': postflight_health.rc | default(None),
+               'new_hardware_findings': new_hardware_findings | default([]),
+               'new_k8s_findings': new_k8s_findings | default([])
+             } | to_nice_json }}
+      when: phase in ['full', 'restore']
+
+    - name: Close out the window
+      ansible.builtin.assert:
+        that:
+          - (postflight_health.rc | default(0)) == 0
+          - (new_hardware_findings | default([])) | length == 0
+          - (new_k8s_findings | default([])) | length == 0
+        fail_msg: >-
+          Maintenance on rack {{ rack }} introduced new findings —
+          {{ (new_hardware_findings | default([])) | length }} hardware,
+          {{ (new_k8s_findings | default([])) | length }} Kubernetes.
+          See {{ report_dir }}/{{ change_id }}-{{ rack }}-post.json
+        success_msg: >-
+          {{ change_id }}: rack {{ rack }} maintenance complete, no new findings.
+      when: phase in ['full', 'restore']

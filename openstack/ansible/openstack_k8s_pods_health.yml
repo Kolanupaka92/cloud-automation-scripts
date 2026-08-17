@@ -1,0 +1,130 @@
+---
+# Health check for OpenStack control-plane services running as Kubernetes pods
+# (OpenStack-Helm / Kolla-on-Kubernetes style deployments).
+#
+#   ansible-playbook openstack_k8s_pods_health.yml
+#   ansible-playbook openstack_k8s_pods_health.yml -e k8s_health_fail_on_findings=false
+#   ansible-playbook openstack_k8s_pods_health.yml -e openstack_namespace=openstack-prod
+#
+# Read-only. Recovery lives in openstack_k8s_service_restart.yml so that this
+# can be run safely in the middle of an incident.
+#
+# Requires: ansible-galaxy collection install kubernetes.core
+#           export K8S_AUTH_KUBECONFIG=/path/to/kubeconfig
+
+- name: OpenStack on Kubernetes control-plane health
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    openstack_namespace: openstack
+    infra_namespace: openstack
+    # Every OpenStack service that must have all replicas available. Trim this
+    # to the services actually deployed in your region.
+    openstack_core_deployments:
+      - keystone-api
+      - glance-api
+      - placement-api
+      - nova-api-osapi
+      - nova-api-metadata
+      - nova-scheduler
+      - nova-conductor
+      - neutron-server
+      - cinder-api
+      - cinder-scheduler
+      - horizon
+    # Agents that must run on every eligible node.
+    openstack_daemonsets:
+      - nova-compute
+      - neutron-ovs-agent
+      - neutron-l3-agent
+      - neutron-dhcp-agent
+      - neutron-metadata-agent
+      - libvirt
+    # Stateful infrastructure the whole control plane depends on.
+    openstack_statefulsets:
+      - mariadb-server
+      - rabbitmq-rabbitmq
+
+    k8s_health_namespaces: "{{ [openstack_namespace, infra_namespace] | unique }}"
+
+  pre_tasks:
+    - name: Build the required-workload list from the service inventory
+      ansible.builtin.set_fact:
+        k8s_health_required_workloads: >-
+          {{ k8s_health_required_workloads | default([]) + [{
+               'kind': item.1,
+               'namespace': item.2,
+               'name': item.0
+             }] }}
+      loop: >-
+        {{ (openstack_core_deployments | product(['Deployment'], [openstack_namespace]) | list)
+           + (openstack_daemonsets | product(['DaemonSet'], [openstack_namespace]) | list)
+           + (openstack_statefulsets | product(['StatefulSet'], [infra_namespace]) | list) }}
+      loop_control:
+        label: "{{ item.2 }}/{{ item.1 }}/{{ item.0 }}"
+
+  roles:
+    - role: k8s_workload_health
+
+  post_tasks:
+    - name: Check the Galera cluster is at full size
+      kubernetes.core.k8s_exec:
+        namespace: "{{ infra_namespace }}"
+        pod: mariadb-server-0
+        command: >-
+          mysql -N -B -e "SHOW STATUS LIKE 'wsrep_cluster_size'"
+      register: galera
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Galera quorum
+      ansible.builtin.assert:
+        that:
+          - (galera.stdout | default('') ).split() | last | default('0') | int
+            >= (galera_min_cluster_size | default(3) | int)
+        fail_msg: >-
+          Galera cluster size is
+          {{ (galera.stdout | default('unknown')).split() | last | default('unknown') }},
+          below the required {{ galera_min_cluster_size | default(3) }}
+        success_msg: "Galera cluster at full size"
+      when: galera.rc | default(1) == 0
+
+    - name: Check RabbitMQ cluster membership and queue depth
+      kubernetes.core.k8s_exec:
+        namespace: "{{ infra_namespace }}"
+        pod: rabbitmq-rabbitmq-0
+        command: rabbitmqctl cluster_status --formatter json
+      register: rabbit
+      changed_when: false
+      failed_when: false
+
+    - name: Report RabbitMQ status
+      ansible.builtin.debug:
+        msg: >-
+          RabbitMQ:
+          {{ 'reachable' if (rabbit.rc | default(1)) == 0 else 'UNREACHABLE from the control plane' }}
+
+    - name: Verify the OpenStack API endpoints answer
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        method: GET
+        status_code: "{{ item.expect | default([200, 300]) }}"
+        validate_certs: "{{ openstack_validate_certs | default(true) }}"
+        timeout: 10
+      register: endpoint_checks
+      failed_when: false
+      changed_when: false
+      loop: "{{ openstack_api_endpoints | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Report unreachable endpoints
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} -> {{ item.status | default('no response') }}"
+      loop: "{{ endpoint_checks.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name | default('-') }}"
+      when:
+        - item.item is defined
+        - (item.status | default(0)) not in (item.item.expect | default([200, 300]))

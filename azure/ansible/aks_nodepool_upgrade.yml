@@ -1,0 +1,143 @@
+---
+# Controlled AKS node pool upgrade: check readiness, cordon-and-surge one pool
+# at a time, verify workloads, then move on. System pools go last so the
+# control-plane add-ons keep a stable home while user pools cycle.
+#
+#   ansible-playbook aks_nodepool_upgrade.yml -e cluster=prod-aks-eastus \
+#       -e resource_group=rg-prod-aks -e target_version=1.30.4 --check
+#
+# Requires: ansible-galaxy collection install azure.azcollection kubernetes.core
+
+- name: Upgrade AKS node pools in a controlled order
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    max_surge: "33%"
+    drain_timeout_seconds: 600
+    pdb_grace_seconds: 60
+    verify_namespaces: [default, kube-system]
+    health_script: "{{ playbook_dir }}/../python/aks_health_check.py"
+
+  tasks:
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - cluster is defined
+          - resource_group is defined
+          - target_version is defined
+        fail_msg: "Pass -e cluster=... -e resource_group=... -e target_version=..."
+
+    - name: Run the pre-upgrade health check
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ health_script }}"
+          - "--resource-group={{ resource_group }}"
+          - "--cluster={{ cluster }}"
+          - "--min-severity=FAIL"
+          - "--fail-on-findings"
+      register: preflight
+      changed_when: false
+      failed_when: preflight.rc != 0
+      check_mode: false
+
+    - name: Fetch the current cluster state
+      azure.azcollection.azure_rm_aks_info:
+        resource_group: "{{ resource_group }}"
+        name: "{{ cluster }}"
+      register: aks
+
+    - name: Extract the node pools, user pools first
+      ansible.builtin.set_fact:
+        node_pools: >-
+          {{ (aks.aks[0].agent_pool_profiles | selectattr('mode', 'ne', 'System') | list)
+             + (aks.aks[0].agent_pool_profiles | selectattr('mode', 'eq', 'System') | list) }}
+
+    - name: Show the planned upgrade order
+      ansible.builtin.debug:
+        msg: >-
+          {{ cluster }}: control plane {{ aks.aks[0].kubernetes_version }} -> {{ target_version }};
+          pools in order: {{ node_pools | map(attribute='name') | join(' -> ') }}
+
+    - name: Upgrade the control plane first
+      azure.azcollection.azure_rm_aks:
+        resource_group: "{{ resource_group }}"
+        name: "{{ cluster }}"
+        kubernetes_version: "{{ target_version }}"
+        state: present
+      when: aks.aks[0].kubernetes_version != target_version
+
+    - name: Upgrade each node pool in order
+      azure.azcollection.azure_rm_aksagentpool:
+        resource_group: "{{ resource_group }}"
+        cluster_name: "{{ cluster }}"
+        name: "{{ item.name }}"
+        orchestrator_version: "{{ target_version }}"
+        upgrade_settings:
+          max_surge: "{{ max_surge }}"
+        state: present
+      loop: "{{ node_pools }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.mode | default('User') }})"
+
+    - name: Wait for every node to report Ready on the target version
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: nodes
+      until: >-
+        nodes.resources | length > 0 and
+        nodes.resources
+        | rejectattr('status.nodeInfo.kubeletVersion', 'search', target_version)
+        | list | length == 0
+        and nodes.resources
+        | map(attribute='status.conditions')
+        | map('selectattr', 'type', 'eq', 'Ready')
+        | map('map', attribute='status')
+        | map('first')
+        | reject('equalto', 'True')
+        | list | length == 0
+      retries: 60
+      delay: 30
+      when: not ansible_check_mode
+
+    - name: Check for pods that did not reschedule
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ item }}"
+        field_selectors:
+          - status.phase!=Running
+          - status.phase!=Succeeded
+      register: unhealthy_pods
+      loop: "{{ verify_namespaces }}"
+      when: not ansible_check_mode
+
+    - name: Fail if workloads are unhealthy after the upgrade
+      ansible.builtin.assert:
+        that:
+          - (unhealthy_pods.results | default([]) | map(attribute='resources')
+             | select('defined') | list | flatten | length) == 0
+        fail_msg: >-
+          Pods are not Running after the upgrade:
+          {{ unhealthy_pods.results | default([]) | map(attribute='resources')
+             | select('defined') | list | flatten
+             | map(attribute='metadata.name') | join(', ') }}
+        success_msg: "All monitored workloads are healthy on {{ target_version }}"
+      when: not ansible_check_mode
+
+    - name: Run the post-upgrade health check
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ health_script }}"
+          - "--resource-group={{ resource_group }}"
+          - "--cluster={{ cluster }}"
+        # Reported, not enforced: post-upgrade INFO findings are expected.
+      register: postflight
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the post-upgrade report
+      ansible.builtin.debug:
+        var: postflight.stdout_lines

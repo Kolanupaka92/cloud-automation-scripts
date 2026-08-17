@@ -1,0 +1,153 @@
+---
+# Provision a standard Linux VM in Azure with the baseline every workload is
+# expected to carry: managed identity, no public IP, an NSG with no inbound
+# admin exposure, boot diagnostics, encryption at host, and Azure Monitor.
+#
+#   ansible-playbook azure_vm_baseline.yml -e @vars/prod.yml --check
+#   ansible-playbook azure_vm_baseline.yml -e vm_name=app-07 -e env=prod
+#
+# Requires: ansible-galaxy collection install azure.azcollection
+#           pip install -r ../../requirements.txt
+
+- name: Provision a baseline Azure VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    location: eastus
+    env: dev
+    resource_group: "rg-{{ env }}-compute"
+    vnet_name: "vnet-{{ env }}"
+    subnet_name: "snet-app"
+    vm_name: "vm-{{ env }}-01"
+    vm_size: Standard_D4s_v5
+    admin_user: cloudops
+    admin_ssh_key_file: "~/.ssh/id_ed25519.pub"
+    os_disk_size_gb: 128
+    data_disks: []
+    # Only these CIDRs may reach SSH; there is no public IP at all by default.
+    management_cidrs:
+      - 10.0.0.0/8
+    common_tags:
+      environment: "{{ env }}"
+      managed_by: ansible
+      owner: cloud-platform
+      cost_center: "{{ cost_center | default('unassigned') }}"
+
+  tasks:
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - env in ['dev', 'test', 'stage', 'prod']
+          - vm_name | length > 0
+          - management_cidrs | length > 0
+        fail_msg: "env must be one of dev/test/stage/prod and management_cidrs must be set"
+
+    - name: Ensure the resource group exists
+      azure.azcollection.azure_rm_resourcegroup:
+        name: "{{ resource_group }}"
+        location: "{{ location }}"
+        tags: "{{ common_tags }}"
+
+    - name: Ensure the virtual network exists
+      azure.azcollection.azure_rm_virtualnetwork:
+        resource_group: "{{ resource_group }}"
+        name: "{{ vnet_name }}"
+        address_prefixes: "{{ vnet_cidr | default('10.42.0.0/16') }}"
+        tags: "{{ common_tags }}"
+
+    - name: Ensure the subnet exists
+      azure.azcollection.azure_rm_subnet:
+        resource_group: "{{ resource_group }}"
+        virtual_network: "{{ vnet_name }}"
+        name: "{{ subnet_name }}"
+        address_prefix: "{{ subnet_cidr | default('10.42.1.0/24') }}"
+        security_group: "nsg-{{ vm_name }}"
+      register: subnet
+
+    - name: Create the network security group
+      azure.azcollection.azure_rm_securitygroup:
+        resource_group: "{{ resource_group }}"
+        name: "nsg-{{ vm_name }}"
+        tags: "{{ common_tags }}"
+        purge_rules: true
+        rules:
+          - name: allow-ssh-from-management
+            protocol: Tcp
+            source_address_prefix: "{{ management_cidrs }}"
+            destination_port_range: 22
+            access: Allow
+            priority: 100
+            direction: Inbound
+          - name: allow-vnet-inbound
+            protocol: "*"
+            source_address_prefix: VirtualNetwork
+            destination_port_range: "*"
+            access: Allow
+            priority: 200
+            direction: Inbound
+          - name: deny-all-inbound
+            protocol: "*"
+            source_address_prefix: "*"
+            destination_port_range: "*"
+            access: Deny
+            priority: 4096
+            direction: Inbound
+
+    - name: Create the network interface (no public IP)
+      azure.azcollection.azure_rm_networkinterface:
+        resource_group: "{{ resource_group }}"
+        name: "nic-{{ vm_name }}"
+        virtual_network: "{{ vnet_name }}"
+        subnet_name: "{{ subnet_name }}"
+        security_group: "nsg-{{ vm_name }}"
+        create_with_security_group: false
+        ip_configurations:
+          - name: ipconfig1
+            private_ip_allocation_method: Dynamic
+            public_ip_address_name: ""
+        tags: "{{ common_tags }}"
+
+    - name: Create the virtual machine
+      azure.azcollection.azure_rm_virtualmachine:
+        resource_group: "{{ resource_group }}"
+        name: "{{ vm_name }}"
+        vm_size: "{{ vm_size }}"
+        admin_username: "{{ admin_user }}"
+        ssh_password_enabled: false
+        ssh_public_keys:
+          - path: "/home/{{ admin_user }}/.ssh/authorized_keys"
+            key_data: "{{ lookup('file', admin_ssh_key_file) }}"
+        managed_disk_type: Premium_LRS
+        os_disk_size_gb: "{{ os_disk_size_gb }}"
+        data_disks: "{{ data_disks }}"
+        network_interfaces: "nic-{{ vm_name }}"
+        boot_diagnostics:
+          enabled: true
+        image:
+          offer: "0001-com-ubuntu-server-jammy"
+          publisher: Canonical
+          sku: "22_04-lts-gen2"
+          version: latest
+        managed_identity:
+          type: SystemAssigned
+        tags: "{{ common_tags }}"
+      register: vm
+
+    - name: Install the Azure Monitor agent
+      azure.azcollection.azure_rm_virtualmachineextension:
+        resource_group: "{{ resource_group }}"
+        virtual_machine_name: "{{ vm_name }}"
+        name: AzureMonitorLinuxAgent
+        publisher: Microsoft.Azure.Monitor
+        virtual_machine_extension_type: AzureMonitorLinuxAgent
+        type_handler_version: "1.0"
+        auto_upgrade_minor_version: true
+
+    - name: Report what was created
+      ansible.builtin.debug:
+        msg: >-
+          {{ vm_name }} ({{ vm_size }}) in {{ resource_group }}/{{ location }};
+          private IP {{ vm.ansible_facts.azure_vm.properties.networkProfile.networkInterfaces[0].id
+                        | default('pending') | basename }};
+          no public IP, SSH restricted to {{ management_cidrs | join(', ') }}

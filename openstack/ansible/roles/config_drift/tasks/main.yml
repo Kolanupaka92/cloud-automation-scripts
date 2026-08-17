@@ -1,0 +1,108 @@
+---
+# Detect configuration drift without correcting it. Detection and remediation
+# are deliberately separate: an unexplained drift is an investigation, not a
+# thing to silently overwrite at 03:00.
+
+- name: Stat the tracked files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop: "{{ drift_tracked_files }}"
+  register: drift_stats
+
+- name: Load the recorded baseline for this host class
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/vars/baseline.yml"
+    name: drift_baseline
+  failed_when: false
+
+- name: Compare file checksums against the baseline
+  ansible.builtin.set_fact:
+    drift_file_findings: >-
+      {{ drift_file_findings | default([]) + [{
+           'type': 'file',
+           'path': item.item,
+           'expected': _expected,
+           'actual': (item.stat.checksum | default('missing')),
+           'detail': ('file is missing' if not item.stat.exists
+                      else 'checksum differs from baseline')
+         }] }}
+  vars:
+    _expected: >-
+      {{ (drift_baseline | default({})).get('checksums', {}).get(item.item, 'unrecorded') }}
+  loop: "{{ drift_stats.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - _expected != 'unrecorded'
+    - (not item.stat.exists) or (item.stat.checksum != _expected)
+
+- name: Read the expected configuration values
+  community.general.ini_file:
+    path: "{{ item.path }}"
+    section: "{{ item.section }}"
+    option: "{{ item.key }}"
+    state: present
+    value: "{{ item.expect }}"
+    mode: "0640"
+  check_mode: true
+  changed_when: false
+  register: drift_config_checks
+  loop: "{{ drift_config_expectations }}"
+  loop_control:
+    label: "{{ item.path }}:[{{ item.section }}]{{ item.key }}"
+  when: item.groups | intersect(group_names) | length > 0
+  failed_when: false
+
+- name: Record configuration value drift
+  ansible.builtin.set_fact:
+    drift_config_findings: >-
+      {{ drift_config_findings | default([]) + [{
+           'type': 'config',
+           'path': item.item.path,
+           'key': item.item.section ~ '/' ~ item.item.key,
+           'expected': item.item.expect,
+           'detail': 'value differs from the declared baseline'
+         }] }}
+  loop: "{{ drift_config_checks.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.path | default('skipped') }}"
+  when:
+    - item.skipped is not defined
+    - item.changed | default(false)
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Record services that are not enabled at boot
+  ansible.builtin.set_fact:
+    drift_service_findings: >-
+      {{ drift_service_findings | default([]) + [{
+           'type': 'service',
+           'name': item,
+           'expected': 'enabled',
+           'actual': (ansible_facts.services[item].status | default('absent')),
+           'detail': 'service is not enabled at boot'
+         }] }}
+  loop: >-
+    {{ group_names
+       | map('extract', drift_enabled_services)
+       | select('defined') | list | flatten | unique }}
+  when: >-
+    item not in ansible_facts.services
+    or ansible_facts.services[item].status not in ['enabled', 'static', 'indirect']
+
+- name: Collect every finding for this host
+  ansible.builtin.set_fact:
+    drift_findings: >-
+      {{ (drift_file_findings | default([]))
+         + (drift_config_findings | default([]))
+         + (drift_service_findings | default([])) }}
+
+- name: Report drift for this host
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{ 'no drift detected' if drift_findings | length == 0
+         else (drift_findings | length) ~ ' drift finding(s): '
+              ~ (drift_findings | map(attribute='detail') | list | join('; ')) }}

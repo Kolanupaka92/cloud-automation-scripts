@@ -1,0 +1,43 @@
+---
+# Files whose content must match the checked-in baseline exactly.
+# Checksums are compared, not contents, so nothing sensitive leaves the host.
+drift_tracked_files:
+  - /etc/ssh/sshd_config
+  - /etc/sysctl.d/99-hardening.conf
+  - /etc/audit/rules.d/50-openstack.rules
+  - /etc/chrony.conf
+  - /etc/resolv.conf
+
+# Config keys that must hold a specific value. Drift here is what actually
+# causes incidents — a compute node left with debug logging on, or a stale
+# transport_url after a controller was replaced.
+drift_config_expectations:
+  - path: /etc/nova/nova.conf
+    section: DEFAULT
+    key: debug
+    expect: "False"
+    groups: [computes, controllers]
+  - path: /etc/nova/nova.conf
+    section: DEFAULT
+    key: cpu_allocation_ratio
+    expect: "4.0"
+    groups: [computes]
+  - path: /etc/neutron/neutron.conf
+    section: DEFAULT
+    key: debug
+    expect: "False"
+    groups: [computes, controllers, network]
+  - path: /etc/nova/nova.conf
+    section: libvirt
+    key: live_migration_permit_auto_converge
+    expect: "True"
+    groups: [computes]
+
+# Services that must be enabled at boot.
+drift_enabled_services:
+  computes: [openstack-nova-compute, libvirtd, neutron-openvswitch-agent, chronyd]
+  controllers: [httpd, memcached, chronyd]
+  network: [neutron-l3-agent, neutron-dhcp-agent, chronyd]
+
+drift_fail_on_drift: true
+drift_report_dir: "{{ playbook_dir }}/reports"

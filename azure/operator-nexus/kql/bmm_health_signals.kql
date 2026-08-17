@@ -1,0 +1,162 @@
+// Operator Nexus — bare metal machine health signals.
+//
+// These are the queries behind the BMM fleet health workbook. Each block is
+// standalone; paste into Log Analytics or reference from a workbook tile.
+// Table names assume the standard Nexus diagnostic settings routing
+// (Cluster / BareMetalMachine logs and metrics into a Log Analytics workspace)
+// plus the Container Insights tables for the Nexus Kubernetes cluster.
+//
+// Adjust the workspace-specific table names if your diagnostic settings use
+// custom log destinations.
+
+// ---------------------------------------------------------------------------
+// 1. Current BMM state, one row per machine, newest record wins.
+// ---------------------------------------------------------------------------
+AzureDiagnostics
+| where ResourceProvider == "MICROSOFT.NETWORKCLOUD"
+| where Category == "BareMetalMachineOperations" or ResourceType == "BAREMETALMACHINES"
+| summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)
+| project
+    TimeGenerated,
+    MachineName,
+    RackId = tostring(properties_rackId_s),
+    RackSlot = toint(properties_rackSlot_d),
+    ReadyState = tostring(properties_readyState_s),
+    PowerState = tostring(properties_powerState_s),
+    CordonStatus = tostring(properties_cordonStatus_s),
+    DetailedStatus = tostring(properties_detailedStatus_s),
+    DetailedStatusMessage = tostring(properties_detailedStatusMessage_s)
+| extend Healthy = ReadyState == "True"
+                   and PowerState == "On"
+                   and CordonStatus == "Uncordoned"
+                   and DetailedStatus in ("Available", "Provisioned")
+| order by RackId asc, RackSlot asc
+
+// ---------------------------------------------------------------------------
+// 2. Rack-level readiness — the number that decides GO / NO-GO on a window.
+// ---------------------------------------------------------------------------
+AzureDiagnostics
+| where ResourceType == "BAREMETALMACHINES"
+| summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)
+| extend
+    RackId = tostring(properties_rackId_s),
+    Healthy = tostring(properties_readyState_s) == "True"
+              and tostring(properties_powerState_s) == "On"
+              and tostring(properties_cordonStatus_s) == "Uncordoned"
+| summarize
+    Total = count(),
+    Healthy = countif(Healthy),
+    Cordoned = countif(tostring(properties_cordonStatus_s) == "Cordoned"),
+    PoweredOff = countif(tostring(properties_powerState_s) == "Off")
+    by RackId
+| extend MaintenanceHeadroom = Healthy - 3   // the minimum this rack must retain
+| extend Verdict = iff(MaintenanceHeadroom > 0, "GO", "NO-GO")
+| order by RackId asc
+
+// ---------------------------------------------------------------------------
+// 3. State transitions over the window — what actually changed and when.
+//    Use this to prove a maintenance window did only what it was supposed to.
+// ---------------------------------------------------------------------------
+let window = 7d;
+AzureDiagnostics
+| where TimeGenerated > ago(window)
+| where ResourceType == "BAREMETALMACHINES"
+| project TimeGenerated, MachineName = tostring(Resource),
+          PowerState = tostring(properties_powerState_s),
+          CordonStatus = tostring(properties_cordonStatus_s),
+          ReadyState = tostring(properties_readyState_s)
+| sort by MachineName asc, TimeGenerated asc
+| extend PrevPower = prev(PowerState), PrevMachine = prev(MachineName)
+| where MachineName == PrevMachine and PowerState != PrevPower
+| project TimeGenerated, MachineName, Transition = strcat(PrevPower, " -> ", PowerState)
+| order by TimeGenerated desc
+
+// ---------------------------------------------------------------------------
+// 4. Hardware alerts raised against bare metal machines.
+// ---------------------------------------------------------------------------
+AlertsManagementResources
+| where type =~ "microsoft.alertsmanagement/alerts"
+| extend
+    Severity = tostring(properties.essentials.severity),
+    State = tostring(properties.essentials.alertState),
+    Target = tostring(properties.essentials.targetResource),
+    FiredAt = todatetime(properties.essentials.startDateTime)
+| where Target has "/bareMetalMachines/"
+| where State != "Closed"
+| project FiredAt, Severity, State, Machine = tostring(split(Target, "/")[-1]),
+          AlertRule = tostring(properties.essentials.alertRule)
+| order by Severity asc, FiredAt desc
+
+// ---------------------------------------------------------------------------
+// 5. Nexus Kubernetes nodes correlated with the BMM hosting them.
+//    A NotReady node is only actionable once you know which machine to look at.
+// ---------------------------------------------------------------------------
+let bmm =
+    AzureDiagnostics
+    | where ResourceType == "BAREMETALMACHINES"
+    | summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)
+    | project MachineName,
+              KubernetesNode = tostring(properties_kubernetesNodeName_s),
+              RackId = tostring(properties_rackId_s),
+              PowerState = tostring(properties_powerState_s),
+              BmmReady = tostring(properties_readyState_s);
+KubeNodeInventory
+| where TimeGenerated > ago(15m)
+| summarize arg_max(TimeGenerated, *) by Computer
+| project KubernetesNode = Computer, NodeStatus = Status, LastSeen = TimeGenerated
+| join kind=leftouter bmm on KubernetesNode
+| project LastSeen, KubernetesNode, NodeStatus, MachineName, RackId, PowerState, BmmReady
+| extend Correlation = case(
+      NodeStatus != "Ready" and PowerState == "Off", "expected: BMM is powered off",
+      NodeStatus != "Ready" and BmmReady != "True",  "BMM is also unhealthy — hardware first",
+      NodeStatus != "Ready",                          "BMM healthy but node NotReady — kubelet/CNI",
+      "healthy")
+| where NodeStatus != "Ready"
+| order by RackId asc
+
+// ---------------------------------------------------------------------------
+// 6. Disk pressure and filesystem utilisation on Nexus Kubernetes nodes.
+// ---------------------------------------------------------------------------
+InsightsMetrics
+| where TimeGenerated > ago(1h)
+| where Namespace == "container.azm.ms/disk" and Name == "used_percent"
+| extend Device = tostring(todynamic(Tags)["device"]),
+         MountPath = tostring(todynamic(Tags)["path"])
+| summarize UsedPct = max(Val) by Computer, Device, MountPath
+| where UsedPct >= 80
+| extend Severity = iff(UsedPct >= 90, "CRITICAL", "WARN")
+| order by UsedPct desc
+
+// ---------------------------------------------------------------------------
+// 7. Network interface errors and drops on the fabric-facing interfaces.
+// ---------------------------------------------------------------------------
+InsightsMetrics
+| where TimeGenerated > ago(6h)
+| where Namespace == "container.azm.ms/net"
+| where Name in ("err_in", "err_out", "drop_in", "drop_out")
+| extend Interface = tostring(todynamic(Tags)["interface"])
+| summarize Total = sum(Val) by Computer, Interface, Name
+| where Total > 0
+| summarize Errors = sumif(Total, Name startswith "err"),
+            Drops  = sumif(Total, Name startswith "drop")
+            by Computer, Interface
+| where Errors > 0 or Drops > 1000
+| order by Errors desc, Drops desc
+
+// ---------------------------------------------------------------------------
+// 8. Maintenance window audit trail — every power and cordon action, by whom.
+//    This is the query that answers "who took that machine down".
+// ---------------------------------------------------------------------------
+let window = 30d;
+AzureActivity
+| where TimeGenerated > ago(window)
+| where OperationNameValue has "MICROSOFT.NETWORKCLOUD/BAREMETALMACHINES"
+| where OperationNameValue has_any ("POWEROFF", "START", "RESTART", "CORDON", "UNCORDON", "REPLACE")
+| project
+    TimeGenerated,
+    Machine = tostring(split(_ResourceId, "/")[-1]),
+    Operation = tostring(split(OperationNameValue, "/")[-2]),
+    Status = ActivityStatusValue,
+    Caller,
+    CorrelationId
+| order by TimeGenerated desc

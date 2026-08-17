@@ -1,0 +1,46 @@
+{{ ansible_managed | comment }}
+# Managed by the linux_hardening role. Local edits will be overwritten.
+
+Port 22
+AddressFamily inet
+Protocol 2
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# Cryptography
+Ciphers {{ hardening_ssh_ciphers }}
+MACs {{ hardening_ssh_macs }}
+KexAlgorithms {{ hardening_ssh_kex }}
+
+# Authentication
+PermitRootLogin {{ hardening_ssh_permit_root_login }}
+PasswordAuthentication {{ hardening_ssh_password_authentication }}
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+MaxAuthTries {{ hardening_ssh_max_auth_tries }}
+MaxSessions 10
+LoginGraceTime 60
+{% if hardening_ssh_allow_groups %}
+AllowGroups {{ hardening_ssh_allow_groups }}
+{% endif %}
+
+# Session hygiene
+ClientAliveInterval {{ hardening_ssh_client_alive_interval }}
+ClientAliveCountMax {{ hardening_ssh_client_alive_count_max }}
+TCPKeepAlive no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitUserEnvironment no
+IgnoreRhosts yes
+HostbasedAuthentication no
+UsePAM yes
+
+# Logging
+SyslogFacility AUTHPRIV
+LogLevel VERBOSE
+
+Banner /etc/issue.net
+Subsystem sftp /usr/libexec/openssh/sftp-server -l INFO -f AUTHPRIV

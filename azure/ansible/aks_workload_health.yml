@@ -1,0 +1,84 @@
+---
+# Workload health check for an AKS cluster, using the same shared role as the
+# OpenStack-on-Kubernetes and Nexus Kubernetes checks so findings are directly
+# comparable across platforms.
+#
+#   ansible-playbook aks_workload_health.yml -e '{"tenant_namespaces":["payments","api"]}'
+#   ansible-playbook aks_workload_health.yml -e k8s_health_fail_on_findings=false
+#
+# Requires: ansible-galaxy collection install kubernetes.core
+#           az aks get-credentials -g <rg> -n <cluster>
+
+- name: AKS workload health
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    platform_namespaces:
+      - kube-system
+      - gatekeeper-system
+    tenant_namespaces: []
+    k8s_health_namespaces: "{{ (platform_namespaces + tenant_namespaces) | unique }}"
+    k8s_health_required_workloads:
+      - { kind: Deployment, namespace: kube-system, name: coredns }
+      - { kind: Deployment, namespace: kube-system, name: metrics-server }
+      - { kind: DaemonSet, namespace: kube-system, name: kube-proxy }
+    k8s_health_fail_on_findings: false
+
+  roles:
+    - role: k8s_workload_health
+
+  post_tasks:
+    - name: Check for pods evicted by node pressure
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ item }}"
+        field_selectors:
+          - status.phase=Failed
+      register: evicted
+      loop: "{{ k8s_health_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report evictions
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.metadata.namespace }}/{{ item.metadata.name }}:
+          {{ item.status.reason | default('Failed') }} — {{ item.status.message | default('') }}
+      loop: >-
+        {{ evicted.results | map(attribute='resources') | select('defined') | list | flatten }}
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Check that every workload declares resource requests
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: "{{ item }}"
+      register: deployments
+      loop: "{{ tenant_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Flag deployments without CPU or memory requests
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.metadata.namespace }}/{{ item.metadata.name }} has containers with no
+          resource requests — the scheduler cannot place these safely and they are
+          the first thing evicted under node pressure.
+      loop: >-
+        {{ deployments.results | map(attribute='resources') | select('defined') | list | flatten }}
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        item.spec.template.spec.containers
+        | rejectattr('resources.requests', 'defined') | list | length > 0
+
+    - name: Fail on critical findings
+      ansible.builtin.assert:
+        that:
+          - k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length == 0
+        fail_msg: >-
+          {{ k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length }}
+          critical finding(s) in the cluster.
+        success_msg: "AKS cluster healthy across {{ k8s_health_namespaces | join(', ') }}"
+      when: fail_on_findings | default(true) | bool

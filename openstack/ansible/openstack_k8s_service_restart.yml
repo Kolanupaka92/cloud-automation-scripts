@@ -1,0 +1,176 @@
+---
+# Controlled rolling restart of an OpenStack control-plane service running on
+# Kubernetes, with health verification before and after.
+#
+#   ansible-playbook openstack_k8s_service_restart.yml -e service=neutron-server
+#   ansible-playbook openstack_k8s_service_restart.yml -e service=nova-api-osapi \
+#       -e kind=Deployment -e change_id=CHG0041827
+#   ansible-playbook openstack_k8s_service_restart.yml -e service=nova-compute \
+#       -e kind=DaemonSet -e max_unavailable=1
+#
+# Why a playbook rather than `kubectl rollout restart`: the restart itself is
+# one line, but doing it safely is not. This refuses to restart a service that
+# is already degraded, respects a PodDisruptionBudget, waits for the rollout to
+# actually converge rather than returning immediately, and verifies the API is
+# answering afterwards.
+
+- name: Rolling restart of an OpenStack service on Kubernetes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    openstack_namespace: openstack
+    kind: Deployment
+    change_id: unspecified
+    rollout_timeout_seconds: 900
+    settle_seconds: 30
+    verify_endpoint: ""
+    allow_degraded_restart: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - service is defined and service | length > 0
+          - kind in ['Deployment', 'StatefulSet', 'DaemonSet']
+        fail_msg: "Pass -e service=<name> and optionally -e kind=Deployment|StatefulSet|DaemonSet"
+
+    - name: Require a change record outside of dev
+      ansible.builtin.assert:
+        that: change_id != 'unspecified'
+        fail_msg: "Pass -e change_id=CHG####### so the restart is auditable."
+      when: not (allow_unticketed | default(false) | bool)
+
+    - name: Fetch the workload
+      kubernetes.core.k8s_info:
+        kind: "{{ kind }}"
+        namespace: "{{ openstack_namespace }}"
+        name: "{{ service }}"
+      register: workload
+
+    - name: Fail if the workload does not exist
+      ansible.builtin.assert:
+        that: workload.resources | length > 0
+        fail_msg: "{{ kind }} {{ openstack_namespace }}/{{ service }} not found"
+
+    - name: Record the pre-restart replica state
+      ansible.builtin.set_fact:
+        pre_desired: >-
+          {{ (workload.resources | first).status.desiredNumberScheduled
+             | default((workload.resources | first).spec.replicas | default(0)) | int }}
+        pre_available: >-
+          {{ (workload.resources | first).status.numberAvailable
+             | default((workload.resources | first).status.availableReplicas | default(0)) | int }}
+
+    - name: Refuse to restart an already-degraded service
+      ansible.builtin.assert:
+        that: pre_available | int == pre_desired | int
+        fail_msg: >-
+          {{ service }} is already degraded ({{ pre_available }}/{{ pre_desired }} available).
+          Fix the existing problem first, or pass -e allow_degraded_restart=true.
+        success_msg: "{{ service }}: {{ pre_available }}/{{ pre_desired }} available before restart"
+      when: not (allow_degraded_restart | bool)
+
+    - name: Check for a PodDisruptionBudget
+      kubernetes.core.k8s_info:
+        kind: PodDisruptionBudget
+        namespace: "{{ openstack_namespace }}"
+      register: pdbs
+
+    - name: Report the disruption budget in effect
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.metadata.name }}: {{ item.status.disruptionsAllowed | default(0) }}
+          disruption(s) currently allowed
+      loop: "{{ pdbs.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        (item.spec.selector.matchLabels | default({})).values() | list
+        | select('search', service) | list | length > 0
+
+    - name: Capture the pods that exist before the restart
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ openstack_namespace }}"
+        label_selectors:
+          - "application={{ service.split('-') | first }}"
+      register: pre_pods
+
+    - name: Trigger the rolling restart
+      kubernetes.core.k8s:
+        state: patched
+        kind: "{{ kind }}"
+        namespace: "{{ openstack_namespace }}"
+        name: "{{ service }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime }}"
+                  ops.restart/change-id: "{{ change_id }}"
+      register: restart_patch
+
+    - name: Wait for the rollout to converge
+      kubernetes.core.k8s_info:
+        kind: "{{ kind }}"
+        namespace: "{{ openstack_namespace }}"
+        name: "{{ service }}"
+      register: rollout
+      until: >-
+        (rollout.resources | length > 0)
+        and (
+          (rollout.resources | first).status.numberAvailable
+          | default((rollout.resources | first).status.availableReplicas | default(0)) | int
+        ) >= (pre_desired | int)
+        and (
+          (rollout.resources | first).status.updatedNumberScheduled
+          | default((rollout.resources | first).status.updatedReplicas | default(0)) | int
+        ) >= (pre_desired | int)
+      retries: "{{ (rollout_timeout_seconds | int / 15) | round | int }}"
+      delay: 15
+
+    - name: Let the new pods settle before verifying
+      ansible.builtin.pause:
+        seconds: "{{ settle_seconds }}"
+      when: not ansible_check_mode
+
+    - name: Confirm no pod is crash-looping after the restart
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ openstack_namespace }}"
+      register: post_pods
+
+    - name: Fail on pods that came back unhealthy
+      ansible.builtin.assert:
+        that:
+          - _broken | length == 0
+        fail_msg: "Pods unhealthy after restarting {{ service }}: {{ _broken | join(', ') }}"
+        success_msg: "{{ service }} restarted cleanly ({{ pre_desired }} replica(s))"
+      vars:
+        _broken: >-
+          {{ post_pods.resources | default([])
+             | selectattr('metadata.name', 'search', service)
+             | selectattr('status.phase', 'ne', 'Running')
+             | map(attribute='metadata.name') | list }}
+
+    - name: Verify the service endpoint still answers
+      ansible.builtin.uri:
+        url: "{{ verify_endpoint }}"
+        method: GET
+        status_code: [200, 300, 401]   # 401 is a healthy unauthenticated Keystone probe
+        timeout: 10
+        validate_certs: "{{ openstack_validate_certs | default(true) }}"
+      register: endpoint
+      retries: 5
+      delay: 10
+      until: endpoint.status is defined
+      when: verify_endpoint | length > 0
+
+    - name: Summarise
+      ansible.builtin.debug:
+        msg: >-
+          {{ change_id }}: restarted {{ kind }} {{ openstack_namespace }}/{{ service }};
+          {{ pre_desired }} replica(s) back in service
+          {{ ('; endpoint returned ' ~ endpoint.status) if verify_endpoint | length > 0 else '' }}

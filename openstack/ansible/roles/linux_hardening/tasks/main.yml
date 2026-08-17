@@ -1,0 +1,123 @@
+---
+# Idempotent baseline hardening. Every task validates before it commits, so a
+# bad template can never lock the fleet out over SSH.
+
+- name: Apply kernel hardening parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+    state: present
+    reload: true
+  loop: "{{ hardening_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: hardening_manage_sysctl | bool
+
+- name: Keep IP forwarding on where Neutron needs it
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+    state: present
+    reload: true
+  when:
+    - hardening_manage_sysctl | bool
+    - "'computes' in group_names or 'network' in group_names"
+
+- name: Disable unused filesystem modules
+  ansible.builtin.copy:
+    dest: "/etc/modprobe.d/{{ item }}.conf"
+    content: "install {{ item }} /bin/true\n"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ hardening_unused_filesystems }}"
+  when: hardening_disable_unused_filesystems | bool
+
+- name: Deploy the SSH daemon configuration
+  ansible.builtin.template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+    validate: "/usr/sbin/sshd -t -f %s"
+  notify: Reload sshd
+  when: hardening_manage_ssh | bool
+
+- name: Set the login banners
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    content: "{{ hardening_login_banner }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - /etc/issue
+    - /etc/issue.net
+    - /etc/motd
+  when: hardening_manage_banner | bool
+
+- name: Enforce password ageing defaults
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: "^{{ item.key }}\\s"
+    line: "{{ item.key }}\t{{ item.value }}"
+    state: present
+  loop:
+    - { key: PASS_MAX_DAYS, value: "{{ hardening_password_max_days }}" }
+    - { key: PASS_MIN_DAYS, value: "{{ hardening_password_min_days }}" }
+    - { key: PASS_WARN_AGE, value: "{{ hardening_password_warn_age }}" }
+    - { key: PASS_MIN_LEN, value: "{{ hardening_password_min_len }}" }
+  loop_control:
+    label: "{{ item.key }}"
+  when: hardening_manage_password_policy | bool
+
+- name: Ensure auditd is installed
+  ansible.builtin.package:
+    name: audit
+    state: present
+  when: hardening_manage_auditd | bool
+
+- name: Deploy audit rules for privileged and OpenStack-relevant activity
+  ansible.builtin.copy:
+    dest: /etc/audit/rules.d/50-openstack.rules
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # Identity and authorisation changes
+      -w /etc/passwd -p wa -k identity
+      -w /etc/shadow -p wa -k identity
+      -w /etc/group -p wa -k identity
+      -w /etc/sudoers -p wa -k privilege
+      -w /etc/sudoers.d/ -p wa -k privilege
+      # OpenStack and virtualisation configuration
+      -w /etc/nova/ -p wa -k openstack-config
+      -w /etc/neutron/ -p wa -k openstack-config
+      -w /etc/cinder/ -p wa -k openstack-config
+      -w /etc/libvirt/ -p wa -k virt-config
+      # Session and privilege escalation
+      -w /var/log/sudo.log -p wa -k privilege
+      -a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k root-cmd
+  notify: Restart auditd
+  when: hardening_manage_auditd | bool
+
+- name: Ensure auditd is running
+  ansible.builtin.service:
+    name: auditd
+    state: started
+    enabled: true
+  when: hardening_manage_auditd | bool
+
+- name: Lock down permissions on sensitive OpenStack config
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0640"
+    state: file
+  loop:
+    - /etc/nova/nova.conf
+    - /etc/neutron/neutron.conf
+  failed_when: false          # not every host runs every service

@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .venv/
+  - reports/
+  - state/
+
+skip_list:
+  # Playbooks here are run ad hoc against a named region, not from a fixed
+  # inventory, so localhost plays and command modules are intentional.
+  - name[template]
+
+warn_list:
+  - experimental

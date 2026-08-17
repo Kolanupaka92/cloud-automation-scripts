@@ -1,0 +1,87 @@
+---
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Byte-compile every script
+        run: python -m compileall -q openstack/python azure/python azure/operator-nexus/python
+
+  ansible:
+    name: Ansible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: pip install ansible-core ansible-lint yamllint
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: Install required collections
+        run: |
+          ansible-galaxy collection install \
+            kubernetes.core ansible.posix community.general openstack.cloud
+
+      - name: Syntax-check every playbook
+        run: |
+          set -e
+          for playbook in \
+            openstack/ansible/*.yml \
+            azure/ansible/*.yml \
+            azure/operator-nexus/ansible/*.yml
+          do
+            echo "==> $playbook"
+            ansible-playbook --syntax-check -i localhost, "$playbook" || exit 1
+          done
+
+      - name: ansible-lint
+        run: ansible-lint || true   # advisory until every site-specific rule is tuned
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail on committed credentials
+        run: |
+          set +e
+          pattern='(BEGIN [A-Z ]*PRIVATE KEY|OS_PASSWORD=|AZURE_CLIENT_SECRET=|client_secret"?\s*[:=])'
+          matches=$(grep -rInE "$pattern" --exclude-dir=.git . )
+          if [ -n "$matches" ]; then
+            echo "Possible credential material committed:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No credential patterns found."

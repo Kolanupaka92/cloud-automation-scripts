@@ -1,0 +1,30 @@
+# Python dependencies for every script in this repository.
+# Install into a virtualenv:
+#   python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+
+# --- OpenStack -------------------------------------------------------------
+openstacksdk>=3.0.0
+keystoneauth1>=5.4.0
+
+# --- Azure: identity and shared -------------------------------------------
+azure-identity>=1.15.0
+azure-core>=1.30.0
+azure-mgmt-resource>=23.0.0
+
+# --- Azure: classic IaaS / AKS --------------------------------------------
+azure-mgmt-compute>=30.0.0
+azure-mgmt-network>=25.0.0
+azure-mgmt-monitor>=6.0.0
+azure-mgmt-containerservice>=28.0.0
+
+# --- Azure Operator Nexus (Network Cloud resource provider) ---------------
+azure-mgmt-networkcloud>=1.0.0
+
+# --- Observability ---------------------------------------------------------
+prometheus-client>=0.19.0
+
+# --- Development / CI ------------------------------------------------------
+ansible-core>=2.16
+ansible-lint>=24.2.0
+yamllint>=1.35.0
+ruff>=0.4.0

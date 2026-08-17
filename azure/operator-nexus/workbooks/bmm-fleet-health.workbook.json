@@ -1,0 +1,267 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "## Operator Nexus — Bare Metal Fleet Health\n\nRack-level readiness, machine state and maintenance audit trail for a Nexus instance.\n\nUse the **Rack** filter to scope to a maintenance window. The *Maintenance readiness* tile is the GO/NO-GO gate: a rack must retain at least the configured number of healthy machines before another is taken down."
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "sub-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "Subscription",
+            "type": 6,
+            "isRequired": true,
+            "multiSelect": false,
+            "typeSettings": { "additionalResourceOptions": [] }
+          },
+          {
+            "id": "ws-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "type": 5,
+            "isRequired": true,
+            "typeSettings": {
+              "resourceTypeFilter": { "microsoft.operationalinsights/workspaces": true },
+              "additionalResourceOptions": []
+            }
+          },
+          {
+            "id": "range-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 86400000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 }
+              ]
+            }
+          },
+          {
+            "id": "rack-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "Rack",
+            "type": 2,
+            "isRequired": false,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "value": ["*"],
+            "typeSettings": { "additionalResourceOptions": ["value::all"] },
+            "query": "AzureDiagnostics\n| where ResourceType == \"BAREMETALMACHINES\"\n| summarize arg_max(TimeGenerated, *) by tostring(Resource)\n| distinct RackId = tostring(properties_rackId_s)\n| order by RackId asc",
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces"
+          },
+          {
+            "id": "floor-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "MinHealthyPerRack",
+            "label": "Healthy machines a rack must retain",
+            "type": 1,
+            "isRequired": true,
+            "value": "3"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Fleet summary" },
+      "name": "summary-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where ResourceType == \"BAREMETALMACHINES\"\n| summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n| extend RackId = tostring(properties_rackId_s)\n| where '*' in ({Rack}) or RackId in ({Rack})\n| extend Healthy = tostring(properties_readyState_s) == \"True\"\n    and tostring(properties_powerState_s) == \"On\"\n    and tostring(properties_cordonStatus_s) == \"Uncordoned\"\n    and tostring(properties_detailedStatus_s) in (\"Available\", \"Provisioned\")\n| summarize\n    ['Total machines'] = count(),\n    Healthy = countif(Healthy),\n    Cordoned = countif(tostring(properties_cordonStatus_s) == \"Cordoned\"),\n    ['Powered off'] = countif(tostring(properties_powerState_s) == \"Off\"),\n    ['Not ready'] = countif(tostring(properties_readyState_s) != \"True\")",
+        "size": 3,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "showBorder": true,
+          "titleContent": { "columnMatch": "$gen_group", "formatter": 1 },
+          "leftContent": {
+            "columnMatch": "$gen_metric",
+            "formatter": 12,
+            "formatOptions": { "palette": "auto" }
+          }
+        }
+      },
+      "name": "fleet-tiles"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Maintenance readiness by rack" },
+      "name": "readiness-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where ResourceType == \"BAREMETALMACHINES\"\n| summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n| extend RackId = tostring(properties_rackId_s)\n| where '*' in ({Rack}) or RackId in ({Rack})\n| extend Healthy = tostring(properties_readyState_s) == \"True\"\n    and tostring(properties_powerState_s) == \"On\"\n    and tostring(properties_cordonStatus_s) == \"Uncordoned\"\n| summarize Total = count(), Healthy = countif(Healthy),\n            Cordoned = countif(tostring(properties_cordonStatus_s) == \"Cordoned\"),\n            ['Powered off'] = countif(tostring(properties_powerState_s) == \"Off\")\n    by Rack = RackId\n| extend Headroom = Healthy - toint('{MinHealthyPerRack}')\n| extend Verdict = iff(Headroom > 0, \"GO\", \"NO-GO\")\n| project Rack, Total, Healthy, Cordoned, ['Powered off'], Headroom, Verdict\n| order by Rack asc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Healthy",
+              "formatter": 3,
+              "formatOptions": { "palette": "greenRed" }
+            },
+            {
+              "columnMatch": "Verdict",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "GO", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "Default", "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "rack-readiness"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Machines needing attention" },
+      "name": "unhealthy-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where ResourceType == \"BAREMETALMACHINES\"\n| summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n| extend RackId = tostring(properties_rackId_s), RackSlot = toint(properties_rackSlot_d)\n| where '*' in ({Rack}) or RackId in ({Rack})\n| project\n    Machine = MachineName,\n    Rack = RackId,\n    Slot = RackSlot,\n    Ready = tostring(properties_readyState_s),\n    Power = tostring(properties_powerState_s),\n    Cordon = tostring(properties_cordonStatus_s),\n    Status = tostring(properties_detailedStatus_s),\n    Message = tostring(properties_detailedStatusMessage_s),\n    ['Kubernetes node'] = tostring(properties_kubernetesNodeName_s),\n    ['Last seen'] = TimeGenerated\n| where Ready != \"True\" or Power != \"On\" or Cordon != \"Uncordoned\" or Status !in (\"Available\", \"Provisioned\")\n| order by Rack asc, Slot asc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Power",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "On", "representation": "green", "text": "{0}{1}" },
+                  { "operator": "Default", "representation": "red", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ]
+        },
+        "noDataMessage": "Every machine in scope is healthy."
+      },
+      "name": "unhealthy-machines"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Node ↔ bare metal correlation\n\nA NotReady Kubernetes node is only actionable once the backing machine is identified." },
+      "name": "correlation-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let bmm =\n    AzureDiagnostics\n    | where ResourceType == \"BAREMETALMACHINES\"\n    | summarize arg_max(TimeGenerated, *) by MachineName = tostring(Resource)\n    | project MachineName,\n              KubernetesNode = tostring(properties_kubernetesNodeName_s),\n              RackId = tostring(properties_rackId_s),\n              PowerState = tostring(properties_powerState_s),\n              BmmReady = tostring(properties_readyState_s);\nKubeNodeInventory\n| summarize arg_max(TimeGenerated, *) by Computer\n| project KubernetesNode = Computer, NodeStatus = Status, LastSeen = TimeGenerated\n| join kind=leftouter bmm on KubernetesNode\n| where '*' in ({Rack}) or RackId in ({Rack})\n| extend Diagnosis = case(\n      NodeStatus != \"Ready\" and PowerState == \"Off\", \"expected — BMM powered off\",\n      NodeStatus != \"Ready\" and BmmReady != \"True\",  \"BMM also unhealthy — hardware first\",\n      NodeStatus != \"Ready\",                          \"BMM healthy — investigate kubelet/CNI\",\n      \"healthy\")\n| where NodeStatus != \"Ready\"\n| project LastSeen, KubernetesNode, NodeStatus, Machine = MachineName, Rack = RackId, Power = PowerState, Diagnosis\n| order by Rack asc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "noDataMessage": "All Kubernetes nodes are Ready."
+      },
+      "name": "node-correlation"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Power and cordon audit trail\n\nEvery lifecycle action taken against a bare metal machine, and who took it." },
+      "name": "audit-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureActivity\n| where OperationNameValue has \"MICROSOFT.NETWORKCLOUD/BAREMETALMACHINES\"\n| where OperationNameValue has_any (\"POWEROFF\", \"START\", \"RESTART\", \"CORDON\", \"UNCORDON\", \"REPLACE\")\n| project\n    TimeGenerated,\n    Machine = tostring(split(_ResourceId, \"/\")[-1]),\n    Operation = toupper(tostring(split(OperationNameValue, \"/\")[-2])),\n    Status = ActivityStatusValue,\n    Caller,\n    CorrelationId\n| order by TimeGenerated desc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "noDataMessage": "No bare metal lifecycle operations in this window."
+      },
+      "name": "audit-trail"
+    },
+    {
+      "type": 1,
+      "content": { "json": "### Disk and network pressure" },
+      "name": "pressure-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "InsightsMetrics\n| where Namespace == \"container.azm.ms/disk\" and Name == \"used_percent\"\n| extend Device = tostring(todynamic(Tags)[\"device\"]), MountPath = tostring(todynamic(Tags)[\"path\"])\n| summarize UsedPct = round(max(Val), 1) by Node = Computer, Device, MountPath\n| where UsedPct >= 75\n| extend Severity = case(UsedPct >= 90, \"CRITICAL\", UsedPct >= 80, \"WARN\", \"INFO\")\n| order by UsedPct desc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "UsedPct",
+              "formatter": 8,
+              "formatOptions": { "palette": "greenRed", "min": 0, "max": 100 }
+            }
+          ]
+        },
+        "noDataMessage": "No filesystem above 75% utilisation."
+      },
+      "name": "disk-pressure"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "InsightsMetrics\n| where Namespace == \"container.azm.ms/net\"\n| where Name in (\"err_in\", \"err_out\", \"drop_in\", \"drop_out\")\n| extend Interface = tostring(todynamic(Tags)[\"interface\"])\n| summarize Total = sum(Val) by Node = Computer, Interface, Name\n| summarize Errors = round(sumif(Total, Name startswith \"err\"), 0),\n            Drops  = round(sumif(Total, Name startswith \"drop\"), 0)\n    by Node, Interface\n| where Errors > 0 or Drops > 1000\n| order by Errors desc, Drops desc",
+        "size": 0,
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "noDataMessage": "No interface errors or significant drops in this window."
+      },
+      "name": "network-errors"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

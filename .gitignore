@@ -1,0 +1,40 @@
+# Credentials — never commit any of these
+clouds.yaml
+*openrc*
+*.pem
+*.key
+*.pfx
+.env
+.envrc
+secrets.yml
+vault-password*
+group_vars/*/vault.yml
+azure.auth
+kubeconfig*
+*.kubeconfig
+
+# Site-specific inventories (inventory.example.ini is the committed template)
+inventory.ini
+inventory/
+host_vars/
+group_vars/
+
+# Generated output
+reports/
+state/
+*.retry
+ansible_fact_cache/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

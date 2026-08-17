@@ -1,0 +1,77 @@
+---
+# Read-only health sweep across an OpenStack region, ending with a single
+# consolidated report. Nothing is restarted or reconfigured.
+#
+#   ansible-playbook openstack_service_health.yml
+#   ansible-playbook openstack_service_health.yml -l computes --check
+#   ansible-playbook openstack_service_health.yml -e health_fail_on_error=false
+
+- name: Collect OpenStack service health
+  hosts: openstack
+  gather_facts: true
+  become: true
+  any_errors_fatal: false
+  roles:
+    - openstack_service_health
+
+- name: Publish the consolidated health report
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  become: false
+  vars:
+    report_time: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    unhealthy_hosts: >-
+      {{
+        groups['openstack']
+        | map('extract', hostvars, 'host_health_problems')
+        | select('defined')
+        | list
+      }}
+  tasks:
+    - name: Ensure the report directory exists
+      ansible.builtin.file:
+        path: "{{ health_report_dir | default(playbook_dir ~ '/reports') }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write the JSON report
+      ansible.builtin.copy:
+        dest: "{{ health_report_dir | default(playbook_dir ~ '/reports') }}/health-{{ report_time }}.json"
+        mode: "0640"
+        content: >-
+          {{
+            {
+              'generated_at': report_time,
+              'region': hostvars[groups['openstack'][0]]['region_name'] | default('unknown'),
+              'hosts_checked': groups['openstack'] | length,
+              'hosts': groups['openstack']
+                       | map('extract', hostvars, 'host_health')
+                       | select('defined') | list,
+              'problems': dict(groups['openstack']
+                          | zip(groups['openstack'] | map('extract', hostvars, 'host_health_problems') | list))
+            } | to_nice_json
+          }}
+
+    - name: Summarise hosts needing attention
+      ansible.builtin.debug:
+        msg: >-
+          {{ item }}: {{ hostvars[item].host_health_problems | join('; ') }}
+      loop: "{{ groups['openstack'] }}"
+      when:
+        - hostvars[item].host_health_problems is defined
+        - hostvars[item].host_health_problems | length > 0
+
+    - name: Fail the run when any host is unhealthy
+      ansible.builtin.assert:
+        that:
+          - groups['openstack']
+            | map('extract', hostvars, 'host_health_problems')
+            | select('defined')
+            | select('length')
+            | list | length == 0
+        fail_msg: >-
+          One or more hosts reported problems; see the report in
+          {{ health_report_dir | default(playbook_dir ~ '/reports') }}
+        success_msg: "All {{ groups['openstack'] | length }} host(s) healthy"
+      when: health_fail_on_error | default(true) | bool

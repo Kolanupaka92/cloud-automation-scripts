@@ -1,0 +1,258 @@
+---
+# Read-only Kubernetes health assessment. Never restarts or deletes anything —
+# recovery lives in the dedicated restart/recovery playbooks so that a health
+# check can be run safely during an active incident.
+
+- name: Reset findings for this run
+  ansible.builtin.set_fact:
+    k8s_findings: []
+
+- name: Gather nodes
+  kubernetes.core.k8s_info:
+    kind: Node
+  register: k8s_nodes
+  when: k8s_health_check_nodes | bool
+
+- name: Flag nodes that are not Ready
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'CRITICAL',
+           'kind': 'Node',
+           'namespace': '-',
+           'name': item.metadata.name,
+           'finding': 'node is not Ready (' ~ (_ready_condition | default('unknown')) ~ ')'
+         }] }}
+  vars:
+    _ready_condition: >-
+      {{ (item.status.conditions | selectattr('type', 'eq', 'Ready') | map(attribute='status') | first)
+         | default('unknown') }}
+  loop: "{{ k8s_nodes.resources | default([]) }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - k8s_health_check_nodes | bool
+    - (item.status.conditions | selectattr('type', 'eq', 'Ready')
+       | map(attribute='status') | first | default('Unknown')) != 'True'
+
+- name: Flag nodes under resource pressure or cordoned
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'WARN',
+           'kind': 'Node',
+           'namespace': '-',
+           'name': item.metadata.name,
+           'finding': _reasons | join('; ')
+         }] }}
+  vars:
+    _pressure: >-
+      {{ item.status.conditions
+         | selectattr('type', 'in', k8s_health_bad_node_conditions)
+         | selectattr('status', 'eq', 'True')
+         | map(attribute='type') | list }}
+    _reasons: >-
+      {{ _pressure + (['cordoned (unschedulable)'] if item.spec.unschedulable | default(false) else []) }}
+  loop: "{{ k8s_nodes.resources | default([]) }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - k8s_health_check_nodes | bool
+    - _reasons | length > 0
+
+- name: Gather pods in the monitored namespaces
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ item }}"
+  register: k8s_pods
+  loop: "{{ k8s_health_namespaces }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Flatten the pod list
+  ansible.builtin.set_fact:
+    k8s_all_pods: >-
+      {{ k8s_pods.results | map(attribute='resources') | select('defined') | list | flatten }}
+
+- name: Flag pods that are not Running or Succeeded
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'CRITICAL',
+           'kind': 'Pod',
+           'namespace': item.metadata.namespace,
+           'name': item.metadata.name,
+           'finding': 'phase=' ~ item.status.phase
+                      ~ ((' reason=' ~ item.status.reason) if item.status.reason is defined else '')
+                      ~ ' node=' ~ (item.spec.nodeName | default('unscheduled'))
+         }] }}
+  loop: "{{ k8s_all_pods }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+  when: item.status.phase not in ['Running', 'Succeeded']
+
+- name: Flag Running pods with containers that are not Ready
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'CRITICAL',
+           'kind': 'Pod',
+           'namespace': item.metadata.namespace,
+           'name': item.metadata.name,
+           'finding': 'containers not ready: ' ~ (_not_ready | join(', '))
+         }] }}
+  vars:
+    _not_ready: >-
+      {{ item.status.containerStatuses | default([])
+         | rejectattr('ready') | map(attribute='name') | list }}
+  loop: "{{ k8s_all_pods }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+  when:
+    - item.status.phase == 'Running'
+    - _not_ready | length > 0
+
+- name: Flag containers in a restart loop
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': ('CRITICAL' if _max_restarts >= (k8s_health_restart_fail | int) else 'WARN'),
+           'kind': 'Pod',
+           'namespace': item.metadata.namespace,
+           'name': item.metadata.name,
+           'finding': 'container restarts: ' ~ _restart_detail
+         }] }}
+  vars:
+    _restarts: "{{ item.status.containerStatuses | default([]) | map(attribute='restartCount') | list }}"
+    _max_restarts: "{{ (_restarts | max) if _restarts | length > 0 else 0 }}"
+    _restart_detail: >-
+      {{ item.status.containerStatuses | default([])
+         | selectattr('restartCount', 'gt', k8s_health_restart_warn | int)
+         | map(attribute='name') | list | join(', ') }} ({{ _max_restarts }} max)
+  loop: "{{ k8s_all_pods }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+  when: >-
+    (item.status.containerStatuses | default([])
+     | map(attribute='restartCount') | list | max | default(0)) > (k8s_health_restart_warn | int)
+
+- name: Check required workload replica counts
+  kubernetes.core.k8s_info:
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.namespace }}"
+    name: "{{ item.name }}"
+  register: k8s_required
+  loop: "{{ k8s_health_required_workloads }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.kind }}/{{ item.name }}"
+
+- name: Flag required workloads that are missing or degraded
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'CRITICAL',
+           'kind': item.item.kind,
+           'namespace': item.item.namespace,
+           'name': item.item.name,
+           'finding': _detail
+         }] }}
+  vars:
+    _resource: "{{ item.resources | default([]) | first | default({}) }}"
+    _desired: >-
+      {{ (_resource.status.desiredNumberScheduled | default(_resource.spec.replicas | default(0))) | int }}
+    _available: >-
+      {{ (_resource.status.numberAvailable | default(_resource.status.availableReplicas | default(0))) | int }}
+    _detail: >-
+      {{ 'workload does not exist' if _resource == {}
+         else (_available ~ '/' ~ _desired ~ ' replica(s) available') }}
+  loop: "{{ k8s_required.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.namespace }}/{{ item.item.name }}"
+  when: >-
+    (item.resources | default([]) | length == 0)
+    or (
+      ((item.resources | first).status.numberAvailable
+       | default((item.resources | first).status.availableReplicas | default(0)) | int)
+      <
+      ((item.resources | first).status.desiredNumberScheduled
+       | default((item.resources | first).spec.replicas | default(0)) | int)
+    )
+
+- name: Gather persistent volume claims
+  kubernetes.core.k8s_info:
+    kind: PersistentVolumeClaim
+    namespace: "{{ item }}"
+  register: k8s_pvcs
+  loop: "{{ k8s_health_namespaces }}"
+  loop_control:
+    label: "{{ item }}"
+  when: k8s_health_check_pvcs | bool
+
+- name: Flag PVCs that are not Bound
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'CRITICAL',
+           'kind': 'PersistentVolumeClaim',
+           'namespace': item.metadata.namespace,
+           'name': item.metadata.name,
+           'finding': 'phase=' ~ item.status.phase
+         }] }}
+  loop: >-
+    {{ k8s_pvcs.results | default([]) | map(attribute='resources')
+       | select('defined') | list | flatten }}
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+  when:
+    - k8s_health_check_pvcs | bool
+    - item.status.phase != 'Bound'
+
+- name: Gather jobs
+  kubernetes.core.k8s_info:
+    kind: Job
+    namespace: "{{ item }}"
+  register: k8s_jobs
+  loop: "{{ k8s_health_namespaces }}"
+  loop_control:
+    label: "{{ item }}"
+  when: k8s_health_check_jobs | bool
+
+- name: Flag failed jobs
+  ansible.builtin.set_fact:
+    k8s_findings: >-
+      {{ k8s_findings + [{
+           'severity': 'WARN',
+           'kind': 'Job',
+           'namespace': item.metadata.namespace,
+           'name': item.metadata.name,
+           'finding': (item.status.failed | default(0)) ~ ' failed pod(s)'
+         }] }}
+  loop: >-
+    {{ k8s_jobs.results | default([]) | map(attribute='resources')
+       | select('defined') | list | flatten }}
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+  when:
+    - k8s_health_check_jobs | bool
+    - (item.status.failed | default(0)) | int > 0
+
+- name: Report the findings
+  ansible.builtin.debug:
+    msg: >-
+      {{ k8s_findings | length }} finding(s):
+      {{ k8s_findings
+         | map('regex_replace', '^', '')
+         | list if k8s_findings | length > 0 else 'cluster healthy' }}
+
+- name: Fail when problems were found
+  ansible.builtin.assert:
+    that:
+      - k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length == 0
+    fail_msg: >-
+      {{ k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length }}
+      critical Kubernetes finding(s):
+      {{ k8s_findings | selectattr('severity', 'eq', 'CRITICAL')
+         | map(attribute='name') | join(', ') }}
+    success_msg: >-
+      No critical findings across {{ k8s_health_namespaces | join(', ') }}
+  when: k8s_health_fail_on_findings | bool

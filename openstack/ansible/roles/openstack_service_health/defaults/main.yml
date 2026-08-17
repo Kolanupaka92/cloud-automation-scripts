@@ -1,0 +1,34 @@
+---
+# Services checked per inventory group. Override per site.
+health_controller_services:
+  - httpd
+  - memcached
+  - openstack-nova-api
+  - openstack-nova-conductor
+  - openstack-nova-scheduler
+  - openstack-cinder-api
+  - openstack-cinder-scheduler
+  - openstack-glance-api
+  - neutron-server
+
+health_compute_services:
+  - openstack-nova-compute
+  - libvirtd
+  - neutron-openvswitch-agent
+
+health_network_services:
+  - neutron-l3-agent
+  - neutron-dhcp-agent
+  - neutron-metadata-agent
+  - neutron-openvswitch-agent
+
+# Thresholds that turn a check into a failure.
+health_disk_warn_pct: 80
+health_disk_fail_pct: 90
+health_rabbit_queue_warn: 1000
+health_galera_min_cluster_size: 3
+health_galera_defaults_file: /etc/my.cnf.d/root.cnf
+
+# Where the aggregated report is written on the control machine.
+health_report_dir: "{{ playbook_dir }}/reports"
+health_fail_on_error: true

@@ -1,0 +1,60 @@
+---
+# Baseline hardening for OpenStack control-plane and compute nodes.
+# Every control is individually toggleable so a site can opt out of anything
+# that conflicts with a local requirement.
+
+hardening_manage_ssh: true
+hardening_manage_sysctl: true
+hardening_manage_auditd: true
+hardening_manage_banner: true
+hardening_manage_password_policy: true
+hardening_disable_unused_filesystems: true
+
+# SSH
+hardening_ssh_permit_root_login: "no"
+hardening_ssh_password_authentication: "no"
+hardening_ssh_max_auth_tries: 4
+hardening_ssh_client_alive_interval: 300
+hardening_ssh_client_alive_count_max: 2
+hardening_ssh_allow_groups: "cloud-ops wheel"
+hardening_ssh_ciphers: >-
+  chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr
+hardening_ssh_macs: >-
+  hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+hardening_ssh_kex: >-
+  curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
+
+# Kernel parameters. net.ipv4.ip_forward stays enabled on compute and network
+# nodes because Neutron requires it — the role handles that automatically.
+hardening_sysctl:
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.all.send_redirects: 0
+  net.ipv4.conf.all.accept_source_route: 0
+  net.ipv4.conf.all.log_martians: 1
+  net.ipv4.conf.all.rp_filter: 1
+  net.ipv4.icmp_echo_ignore_broadcasts: 1
+  net.ipv4.tcp_syncookies: 1
+  net.ipv6.conf.all.accept_redirects: 0
+  net.ipv6.conf.all.accept_source_route: 0
+  kernel.randomize_va_space: 2
+  kernel.dmesg_restrict: 1
+  kernel.kptr_restrict: 2
+  fs.suid_dumpable: 0
+
+hardening_unused_filesystems:
+  - cramfs
+  - freevxfs
+  - jffs2
+  - hfs
+  - hfsplus
+  - udf
+
+hardening_password_min_len: 14
+hardening_password_max_days: 90
+hardening_password_min_days: 1
+hardening_password_warn_age: 14
+
+hardening_login_banner: |
+  This system is the property of the operator and is for authorised use only.
+  All activity is logged and monitored. Disconnect immediately if you are not
+  an authorised user.

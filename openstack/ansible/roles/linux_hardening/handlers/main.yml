@@ -1,0 +1,10 @@
+---
+- name: Reload sshd
+  ansible.builtin.service:
+    name: sshd
+    state: reloaded
+
+- name: Restart auditd
+  # auditd refuses a normal systemd restart on RHEL derivatives.
+  ansible.builtin.command: service auditd restart
+  changed_when: true

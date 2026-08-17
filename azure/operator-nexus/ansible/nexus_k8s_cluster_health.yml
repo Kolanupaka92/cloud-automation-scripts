@@ -1,0 +1,97 @@
+---
+# Health check for a Nexus Kubernetes cluster (the tenant Kubernetes running on
+# Operator Nexus) plus the BMMs underneath it, correlated so a NotReady node is
+# immediately traceable to the bare metal machine hosting it.
+#
+#   ansible-playbook nexus_k8s_cluster_health.yml \
+#       -e nexus_resource_group=rg-nexus-prod
+#   ansible-playbook nexus_k8s_cluster_health.yml -e k8s_health_fail_on_findings=false
+#
+# Requires: ansible-galaxy collection install kubernetes.core azure.azcollection
+#           export K8S_AUTH_KUBECONFIG=/path/to/nexus-k8s-kubeconfig
+#                  AZURE_SUBSCRIPTION_ID=...
+
+- name: Nexus Kubernetes and bare metal correlated health
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    nexus_resource_group: "{{ lookup('env', 'NEXUS_RESOURCE_GROUP') }}"
+    workload_namespaces:
+      - kube-system
+      - default
+    # CNF/tenant namespaces to watch in addition to the platform ones.
+    tenant_namespaces: []
+    bmm_health_script: "{{ playbook_dir }}/../python/nexus_bmm_health.py"
+
+    k8s_health_namespaces: "{{ (workload_namespaces + tenant_namespaces) | unique }}"
+    k8s_health_required_workloads:
+      - { kind: DaemonSet, namespace: kube-system, name: kube-proxy }
+      - { kind: Deployment, namespace: kube-system, name: coredns }
+    k8s_health_fail_on_findings: false   # report first, assert at the end
+
+  roles:
+    - role: k8s_workload_health
+
+  post_tasks:
+    - name: Collect the bare metal machine view
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ bmm_health_script }}"
+          - "--resource-group={{ nexus_resource_group }}"
+          - "--format=json"
+      register: bmm_json
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Parse the bare metal machine report
+      ansible.builtin.set_fact:
+        bmm_machines: "{{ bmm_json.stdout | from_json }}"
+      when: bmm_json.stdout | default('') | length > 0
+
+    - name: Correlate NotReady Kubernetes nodes with their bare metal machines
+      ansible.builtin.debug:
+        msg: >-
+          Kubernetes node {{ item.name }} is unhealthy;
+          backing BMM: {{ _bmm.machine | default('not matched') }}
+          {{ ('(rack ' ~ _bmm.rack ~ ' slot ' ~ _bmm.slot
+              ~ ', power=' ~ _bmm.power ~ ', ' ~ _bmm.problems ~ ')')
+             if _bmm.machine is defined else '' }}
+      vars:
+        _bmm: >-
+          {{ (bmm_machines | default([])
+              | selectattr('k8s_node', 'eq', item.name) | first) | default({}) }}
+      loop: "{{ k8s_findings | selectattr('kind', 'eq', 'Node') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: List bare metal machines that are unhealthy but whose node still looks fine
+      ansible.builtin.debug:
+        msg: >-
+          BMM {{ item.machine }} (rack {{ item.rack }} slot {{ item.slot }})
+          reports problems while its Kubernetes node {{ item.k8s_node }} is Ready:
+          {{ item.problems }} — investigate before the next maintenance window.
+      loop: "{{ bmm_machines | default([]) | rejectattr('_healthy') | list }}"
+      loop_control:
+        label: "{{ item.machine }}"
+      when: item.k8s_node not in (k8s_findings | selectattr('kind', 'eq', 'Node')
+                                 | map(attribute='name') | list)
+
+    - name: Summarise cluster health
+      ansible.builtin.debug:
+        msg: >-
+          Kubernetes: {{ k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length }}
+          critical, {{ k8s_findings | selectattr('severity', 'eq', 'WARN') | list | length }} warning.
+          Bare metal: {{ bmm_machines | default([]) | rejectattr('_healthy') | list | length }}
+          of {{ bmm_machines | default([]) | length }} machine(s) unhealthy.
+
+    - name: Fail when either layer has critical problems
+      ansible.builtin.assert:
+        that:
+          - k8s_findings | selectattr('severity', 'eq', 'CRITICAL') | list | length == 0
+          - bmm_machines | default([]) | rejectattr('_healthy') | list | length == 0
+        fail_msg: "Critical findings in the Kubernetes layer, the bare metal layer, or both."
+        success_msg: "Nexus Kubernetes cluster and its bare metal machines are healthy."
+      when: fail_on_findings | default(true) | bool

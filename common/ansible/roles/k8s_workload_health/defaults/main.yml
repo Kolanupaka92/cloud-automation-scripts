@@ -1,0 +1,35 @@
+---
+# Reusable Kubernetes workload health check.
+#
+# Used by the OpenStack-on-Kubernetes playbooks and by the Azure Operator Nexus
+# and AKS playbooks, because the failure modes are identical once the platform
+# is Kubernetes: pods not Ready, containers restarting in a loop, StatefulSet
+# replicas missing, PVCs unbound, jobs wedged, nodes NotReady.
+
+# Namespaces to inspect. Override per platform.
+k8s_health_namespaces: []
+
+# Workloads that must have every replica available. Each entry is
+# {namespace, kind, name}; kind is Deployment, StatefulSet or DaemonSet.
+k8s_health_required_workloads: []
+
+# A container restarting more than this in the window is treated as looping.
+k8s_health_restart_warn: 5
+k8s_health_restart_fail: 20
+
+# Pods younger than this are still starting; do not judge them yet.
+k8s_health_min_pod_age_seconds: 120
+
+# Node conditions that must be false for a node to be considered healthy.
+k8s_health_bad_node_conditions:
+  - MemoryPressure
+  - DiskPressure
+  - PIDPressure
+  - NetworkUnavailable
+
+k8s_health_check_pvcs: true
+k8s_health_check_nodes: true
+k8s_health_check_jobs: true
+
+# Fail the play when problems are found (set false for a reporting-only run).
+k8s_health_fail_on_findings: true

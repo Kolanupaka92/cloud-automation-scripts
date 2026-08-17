@@ -1,0 +1,14 @@
+---
+# Recorded baseline: sha256 of every tracked file as it looked when the region
+# was signed off. Regenerate after an approved change with:
+#
+#   ansible-playbook config_drift_detect.yml --tags record
+#
+# and commit the diff — the git history then *is* the change record for
+# configuration state.
+checksums:
+  /etc/ssh/sshd_config: "unrecorded"
+  /etc/sysctl.d/99-hardening.conf: "unrecorded"
+  /etc/audit/rules.d/50-openstack.rules: "unrecorded"
+  /etc/chrony.conf: "unrecorded"
+  /etc/resolv.conf: "unrecorded"

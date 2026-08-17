@@ -1,0 +1,73 @@
+---
+# Configuration drift detection across the fleet.
+#
+#   ansible-playbook config_drift_detect.yml
+#   ansible-playbook config_drift_detect.yml -l computes -e drift_fail_on_drift=false
+#   ansible-playbook config_drift_detect.yml --tags record   # re-baseline
+#
+# Detection only. Nothing is corrected — an unexplained drift is an
+# investigation, not something to silently overwrite.
+
+- name: Detect configuration drift
+  hosts: openstack
+  gather_facts: true
+  become: true
+  tags: [detect]
+  roles:
+    - role: config_drift
+      when: "'record' not in ansible_run_tags"
+
+- name: Record a new baseline from a reference host
+  hosts: "{{ baseline_reference_host | default('controllers[0]') }}"
+  gather_facts: false
+  become: true
+  tags: [record, never]
+  tasks:
+    - name: Checksum every tracked file
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: "{{ drift_tracked_files }}"
+      register: baseline_stats
+      vars:
+        drift_tracked_files: "{{ lookup('vars', 'drift_tracked_files', default=[]) }}"
+
+    - name: Write the baseline back into the role
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/roles/config_drift/vars/baseline.yml"
+        mode: "0644"
+        content: |
+          ---
+          # Generated from {{ inventory_hostname }} on {{ ansible_date_time.iso8601 | default('unknown date') }}
+          # Regenerate with: ansible-playbook config_drift_detect.yml --tags record
+          checksums:
+          {% for result in baseline_stats.results %}
+            {{ result.item }}: "{{ result.stat.checksum | default('missing') }}"
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+
+- name: Summarise drift across the fleet
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  become: false
+  tags: [detect]
+  tasks:
+    - name: List every host with drift
+      ansible.builtin.debug:
+        msg: "{{ item }}: {{ hostvars[item].drift_findings | to_nice_json }}"
+      loop: "{{ groups['openstack'] }}"
+      when:
+        - hostvars[item].drift_findings is defined
+        - hostvars[item].drift_findings | length > 0
+
+    - name: Fail when drift was detected
+      ansible.builtin.assert:
+        that:
+          - groups['openstack']
+            | map('extract', hostvars, 'drift_findings')
+            | select('defined') | select('length') | list | length == 0
+        fail_msg: "Configuration drift detected; review the findings above."
+        success_msg: "No drift across {{ groups['openstack'] | length }} host(s)."
+      when: drift_fail_on_drift | default(true) | bool

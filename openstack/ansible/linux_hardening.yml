@@ -1,0 +1,31 @@
+---
+# Apply the security baseline to OpenStack nodes.
+#
+#   ansible-playbook linux_hardening.yml --check --diff        # preview
+#   ansible-playbook linux_hardening.yml -l computes
+#   ansible-playbook linux_hardening.yml -e hardening_manage_ssh=false
+#
+# Rolled out in batches with a hard failure budget: if a quarter of a batch
+# fails, the run stops rather than continuing across the fleet.
+
+- name: Apply the Linux security baseline
+  hosts: openstack
+  gather_facts: true
+  become: true
+  serial: "{{ hardening_batch_size | default('25%') }}"
+  max_fail_percentage: 25
+  roles:
+    - linux_hardening
+
+  post_tasks:
+    - name: Verify SSH still accepts the managed configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Verify the hardening sysctls are live
+      ansible.builtin.command: "sysctl -n {{ item }}"
+      register: sysctl_check
+      changed_when: false
+      failed_when: sysctl_check.stdout | trim != hardening_sysctl[item] | string
+      loop: "{{ hardening_sysctl.keys() | list }}"
+      when: hardening_manage_sysctl | bool

@@ -1,0 +1,48 @@
+---
+# Capture a comparable snapshot of Kubernetes health, labelled 'pre' or 'post'
+# so the maintenance playbook can diff the two and prove nothing regressed.
+#
+# Included with: snapshot_label=pre|post
+
+- name: Gather nodes for the {{ snapshot_label }} snapshot
+  kubernetes.core.k8s_info:
+    kind: Node
+  register: snap_nodes
+  failed_when: false
+
+- name: Gather pods that are not Running for the {{ snapshot_label }} snapshot
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ item }}"
+    field_selectors:
+      - status.phase!=Running
+      - status.phase!=Succeeded
+  register: snap_pods
+  loop: "{{ (workload_namespaces | default(['kube-system'])) + (tenant_namespaces | default([])) }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+
+- name: Build the {{ snapshot_label }} finding list
+  ansible.builtin.set_fact:
+    "k8s_snapshot_{{ snapshot_label }}": >-
+      {{
+        (snap_nodes.resources | default([])
+         | rejectattr('status.conditions', 'undefined')
+         | selectattr('status.conditions', 'defined')
+         | map('json_query', "{name: metadata.name, ready: status.conditions[?type=='Ready'].status | [0]}")
+         | selectattr('ready', 'ne', 'True')
+         | map('combine', {'kind': 'Node'}) | list)
+        +
+        (snap_pods.results | default([]) | map(attribute='resources') | select('defined')
+         | list | flatten
+         | map('json_query', '{name: metadata.name, namespace: metadata.namespace, ready: status.phase}')
+         | map('combine', {'kind': 'Pod'}) | list)
+      }}
+
+- name: Report the {{ snapshot_label }} snapshot
+  ansible.builtin.debug:
+    msg: >-
+      {{ snapshot_label }} snapshot:
+      {{ (lookup('vars', 'k8s_snapshot_' ~ snapshot_label) | default([])) | length }}
+      unhealthy object(s)
