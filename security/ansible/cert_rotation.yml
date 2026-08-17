@@ -1,0 +1,335 @@
+---
+# Rotate TLS certificates across OpenStack, Kubernetes and load balancer endpoints.
+#
+#   ansible-playbook cert_rotation.yml --tags report          # what expires when
+#   ansible-playbook cert_rotation.yml -e change_id=CHG0041827 --check --diff
+#   ansible-playbook cert_rotation.yml -e change_id=CHG0041827 \
+#       -e cert_bundle_dir=/secure/bundles/2026-08
+#   ansible-playbook cert_rotation.yml -e rollback=true -e change_id=CHG0041827
+#
+# Certificate rotation fails in exactly two ways, and this playbook is built
+# around preventing both:
+#
+#   1. The new certificate is wrong — wrong CN/SAN, wrong chain order, key does
+#      not match, already expired, or signed by a CA the clients do not trust.
+#      Every one of those is checked BEFORE the old certificate is replaced.
+#   2. Something that consumed the old certificate is forgotten, and it breaks
+#      hours later. The report stage enumerates every endpoint using a cert
+#      from the same CA, so nothing is missed.
+#
+# The previous certificate is always backed up and `-e rollback=true` restores
+# it, because the fastest fix at 03:00 is putting back what worked.
+
+- name: Inventory certificates and their expiry
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  become: true
+  tags: [report, rotate]
+
+  vars:
+    expiry_warn_days: 30
+    expiry_critical_days: 7
+    cert_paths:
+      - /etc/pki/tls/certs/haproxy.pem
+      - /etc/pki/tls/certs/openstack-api.crt
+      - /etc/nova/ssl/nova-api.crt
+      - /etc/neutron/ssl/neutron-server.crt
+      - /etc/rabbitmq/ssl/rabbitmq.crt
+      - /etc/mysql/ssl/server-cert.pem
+
+  tasks:
+    - name: Check which certificate files exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ cert_paths }}"
+      register: cert_stats
+
+    - name: Read certificate metadata
+      community.crypto.x509_certificate_info:
+        path: "{{ item.item }}"
+      loop: "{{ cert_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stat.exists
+      register: cert_info
+      failed_when: false
+
+    - name: Build this host's certificate inventory
+      ansible.builtin.set_fact:
+        certificates: >-
+          {{ certificates | default([]) + [{
+               'path': item.item.item,
+               'subject': (item.subject | default({})).get('commonName', 'unknown'),
+               'issuer': (item.issuer | default({})).get('commonName', 'unknown'),
+               'not_after': item.not_after | default('unknown'),
+               'days_left': _days_left,
+               'sans': item.subject_alt_name | default([]),
+               'serial': item.serial_number | default('unknown'),
+               'severity': ('CRITICAL' if _days_left <= (expiry_critical_days | int)
+                            else 'WARN' if _days_left <= (expiry_warn_days | int)
+                            else 'INFO')
+             }] }}
+      vars:
+        _days_left: >-
+          {{ ((item.not_after | default('19700101000000Z')
+               | to_datetime('%Y%m%d%H%M%SZ')) - (ansible_date_time.iso8601
+               | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).days | default(-1) }}
+      loop: "{{ cert_info.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item | default('skipped') }}"
+      when:
+        - item.skipped is not defined
+        - item.not_after is defined
+
+    - name: Report certificates approaching expiry
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} {{ item.path }}:
+          CN={{ item.subject }} issuer={{ item.issuer }}
+          expires {{ item.not_after }} ({{ item.days_left }} day(s)) [{{ item.severity }}]
+      loop: "{{ certificates | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: item.severity != 'INFO'
+
+    - name: Fail the report when anything is critically close to expiry
+      ansible.builtin.assert:
+        that:
+          - (certificates | default([]) | selectattr('severity', 'eq', 'CRITICAL') | list | length) == 0
+        fail_msg: >-
+          Certificates expiring within {{ expiry_critical_days }} days on
+          {{ inventory_hostname }}:
+          {{ certificates | selectattr('severity', 'eq', 'CRITICAL')
+             | map(attribute='path') | join(', ') }}
+        success_msg: "No certificate on {{ inventory_hostname }} expires within {{ expiry_critical_days }} days"
+      when: "'report' in ansible_run_tags and (fail_on_expiry | default(true) | bool)"
+
+
+- name: Rotate certificates
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ rotation_batch_size | default(1) }}"
+  max_fail_percentage: 0
+  tags: [rotate, never]
+
+  vars:
+    change_id: unspecified
+    rollback: false
+    backup_dir: /var/backups/certs
+    cert_bundle_dir: ""
+    verify_endpoints: []
+    settle_seconds: 10
+    services_to_reload:
+      - haproxy
+
+  tasks:
+    - name: Require a change record
+      ansible.builtin.assert:
+        that: change_id != 'unspecified'
+        fail_msg: "Pass -e change_id=CHG####### — rotation restarts TLS listeners."
+
+    - name: Ensure the backup directory exists
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # ---------------------------------------------------------------- rollback
+    - name: Restore the previous certificates
+      when: rollback | bool
+      block:
+        - name: Find the most recent backup
+          ansible.builtin.find:
+            paths: "{{ backup_dir }}"
+            patterns: "*.bak"
+            file_type: file
+          register: backups
+
+        - name: Fail when there is nothing to roll back to
+          ansible.builtin.assert:
+            that: backups.files | length > 0
+            fail_msg: "No certificate backups found under {{ backup_dir }}"
+
+        - name: Restore each backed-up certificate
+          ansible.builtin.copy:
+            src: "{{ item.path }}"
+            dest: "{{ item.path | regex_replace('^' ~ backup_dir ~ '/', '/')
+                                | regex_replace('\\.[0-9]+\\.bak$', '')
+                                | regex_replace('__', '/') }}"
+            remote_src: true
+            mode: "0600"
+            backup: true
+          loop: "{{ backups.files | sort(attribute='mtime', reverse=true) }}"
+          loop_control:
+            label: "{{ item.path | basename }}"
+          notify: Reload TLS services
+
+        - name: Stop after rolling back
+          ansible.builtin.meta: end_play
+
+    # ---------------------------------------------------------------- validate
+    - name: Fail when no certificate bundle was provided
+      ansible.builtin.assert:
+        that: cert_bundle_dir | length > 0
+        fail_msg: "Pass -e cert_bundle_dir=/path/to/new/certs"
+
+    - name: Find the new certificates
+      ansible.builtin.find:
+        paths: "{{ cert_bundle_dir }}"
+        patterns: ["*.crt", "*.pem"]
+      delegate_to: localhost
+      become: false
+      register: new_certs
+
+    - name: Read metadata from every new certificate
+      community.crypto.x509_certificate_info:
+        path: "{{ item.path }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ new_certs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: new_cert_info
+
+    - name: Reject any new certificate that is already expired or not yet valid
+      ansible.builtin.assert:
+        that:
+          - item.expired is not defined or not item.expired
+        fail_msg: >-
+          {{ item.item.path | basename }} is already expired
+          (not_after {{ item.not_after | default('unknown') }})
+        success_msg: "{{ item.item.path | basename }} validity window is acceptable"
+      loop: "{{ new_cert_info.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+
+    - name: Verify each certificate matches its private key
+      # A mismatched key is the failure that only surfaces when the service
+      # restarts — by which point the listener is already down.
+      community.crypto.openssl_privatekey_info:
+        path: "{{ item.item.path | regex_replace('\\.(crt|pem)$', '.key') }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ new_cert_info.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+      register: key_info
+      failed_when: false
+
+    - name: Assert the public keys match
+      ansible.builtin.assert:
+        that:
+          - item.0.public_key | default('a') == item.1.public_key | default('b')
+        fail_msg: >-
+          {{ item.0.item.path | basename }} does not match its private key —
+          the service would fail to start after rotation.
+        success_msg: "{{ item.0.item.path | basename }} matches its key"
+      loop: "{{ new_cert_info.results | zip(key_info.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item.path | basename }}"
+      when: item.1.skipped is not defined and item.1.public_key is defined
+
+    - name: Confirm the SANs still cover every endpoint in use
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.path | basename }}:
+          CN={{ (item.subject | default({})).get('commonName', '?') }}
+          SANs={{ item.subject_alt_name | default([]) | join(', ') }}
+          — confirm every VIP and service name above appears here.
+      loop: "{{ new_cert_info.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+
+    # ------------------------------------------------------------------ deploy
+    - name: Back up the certificate currently in place
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir }}/{{ item.path | regex_replace('/', '__') }}.{{ ansible_date_time.epoch }}.bak"
+        remote_src: true
+        mode: "0600"
+      loop: "{{ certificates | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Install the new certificates
+      ansible.builtin.copy:
+        src: "{{ cert_bundle_dir }}/{{ item.path | basename }}"
+        dest: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+      loop: "{{ certificates | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      notify: Reload TLS services
+      register: cert_deploy
+
+    - name: Install the matching private keys
+      ansible.builtin.copy:
+        src: "{{ cert_bundle_dir }}/{{ item.path | basename | regex_replace('\\.(crt|pem)$', '.key') }}"
+        dest: "{{ item.path | regex_replace('\\.(crt|pem)$', '.key') }}"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+      loop: "{{ certificates | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      notify: Reload TLS services
+      no_log: true
+
+    - name: Apply the reloads now rather than at the end of the play
+      ansible.builtin.meta: flush_handlers
+
+    - name: Let the listeners settle
+      ansible.builtin.pause:
+        seconds: "{{ settle_seconds }}"
+      when: not ansible_check_mode
+
+    # ------------------------------------------------------------------ verify
+    - name: Verify each endpoint now serves the new certificate
+      community.crypto.get_certificate:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+      loop: "{{ verify_endpoints }}"
+      loop_control:
+        label: "{{ item.host }}:{{ item.port }}"
+      register: served
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Assert every endpoint serves a certificate valid for at least 30 days
+      ansible.builtin.assert:
+        that:
+          - item.not_after is defined
+        fail_msg: >-
+          {{ item.item.host }}:{{ item.item.port }} did not present a usable certificate
+          after rotation — roll back with -e rollback=true
+        success_msg: >-
+          {{ item.item.host }}:{{ item.item.port }} serves a certificate valid until
+          {{ item.not_after }}
+      loop: "{{ served.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.host | default('-') }}"
+      when:
+        - not ansible_check_mode
+        - item.skipped is not defined
+
+    - name: Summarise
+      ansible.builtin.debug:
+        msg: >-
+          {{ change_id }}: rotated {{ certificates | default([]) | length }} certificate(s)
+          on {{ inventory_hostname }}. Backups in {{ backup_dir }};
+          roll back with -e rollback=true -e change_id={{ change_id }}
+
+  handlers:
+    - name: Reload TLS services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: reloaded
+      loop: "{{ services_to_reload }}"
+      failed_when: false

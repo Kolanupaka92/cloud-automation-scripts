@@ -28,7 +28,10 @@ jobs:
         run: ruff check .
 
       - name: Byte-compile every script
-        run: python -m compileall -q openstack/python azure/python azure/operator-nexus/python
+        run: |
+          python -m compileall -q \
+            openstack/python azure/python azure/operator-nexus/python \
+            storage/python kubernetes/python security/python network/python
 
   ansible:
     name: Ansible
@@ -49,7 +52,8 @@ jobs:
       - name: Install required collections
         run: |
           ansible-galaxy collection install \
-            kubernetes.core ansible.posix community.general openstack.cloud azure.azcollection
+            kubernetes.core ansible.posix community.general community.crypto \
+            openstack.cloud azure.azcollection
 
       - name: Syntax-check every playbook
         run: |
@@ -59,7 +63,8 @@ jobs:
           # cfg in the working directory — so check each one from its own
           # directory, exactly as these are run in practice.
           repo="$PWD"
-          for dir in openstack/ansible azure/ansible azure/operator-nexus/ansible; do
+          for dir in openstack/ansible azure/ansible azure/operator-nexus/ansible \
+                     kubernetes/ansible security/ansible hardware/ansible; do
             cd "$repo/$dir"
             for playbook in *.yml; do
               echo "==> $dir/$playbook"

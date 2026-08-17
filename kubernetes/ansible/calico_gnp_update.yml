@@ -1,0 +1,299 @@
+---
+# Safely update Calico GlobalNetworkPolicy (GNP) and NetworkPolicy objects.
+#
+#   ansible-playbook calico_gnp_update.yml -e policy_dir=policies/prod --check --diff
+#   ansible-playbook calico_gnp_update.yml -e policy_dir=policies/prod \
+#       -e change_id=CHG0041827
+#   ansible-playbook calico_gnp_update.yml -e rollback_from=backups/gnp-20260817.yml
+#
+# A network policy change is the most dangerous routine change in a Kubernetes
+# cluster: it takes effect instantly, cluster-wide, and a mistake in an order
+# field or a selector silently blackholes traffic that nothing will alert on
+# until an application times out.
+#
+# So this playbook does five things a bare `kubectl apply` does not:
+#
+#   1. Backs up every existing GNP before touching anything, to a timestamped
+#      file that --rollback_from consumes directly.
+#   2. Validates each policy server-side (dry-run) before any of them is applied,
+#      so a syntax error in file 7 does not leave files 1-6 half applied.
+#   3. Refuses policies that would break the cluster: a default-deny with no
+#      matching allow for kube-dns, an order that shadows the platform tier, or
+#      a selector matching every endpoint in the cluster.
+#   4. Applies in ascending order so allow rules land before deny rules.
+#   5. Verifies connectivity after applying, and rolls back automatically if the
+#      post-check fails.
+#
+# Requires: ansible-galaxy collection install kubernetes.core
+
+- name: Update Calico global network policies
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    policy_dir: policies
+    change_id: unspecified
+    backup_dir: "{{ playbook_dir }}/backups"
+    auto_rollback: true
+    verify_dns: true
+    dns_namespace: kube-system
+    dns_selector: "k8s-app=kube-dns"
+    # Policies below this order are reserved for the platform tier; a tenant
+    # policy landing here would take precedence over cluster-critical rules.
+    reserved_order_below: 100
+    connectivity_test_namespace: default
+    settle_seconds: 15
+
+  tasks:
+    - name: Require a change record
+      ansible.builtin.assert:
+        that: change_id != 'unspecified'
+        fail_msg: >-
+          Pass -e change_id=CHG####### — a policy change takes effect cluster-wide
+          the moment it is applied.
+      when: not (allow_unticketed | default(false) | bool)
+
+    # ------------------------------------------------------------------ backup
+    - name: Ensure the backup directory exists
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Fetch every existing GlobalNetworkPolicy
+      kubernetes.core.k8s_info:
+        api_version: projectcalico.org/v3
+        kind: GlobalNetworkPolicy
+      register: existing_gnp
+
+    - name: Back up the current policy set
+      ansible.builtin.copy:
+        dest: "{{ backup_dir }}/gnp-{{ '%Y%m%dT%H%M%SZ' | strftime }}.yml"
+        mode: "0640"
+        content: |
+          # GlobalNetworkPolicy backup taken before {{ change_id }}
+          # Restore with:
+          #   ansible-playbook calico_gnp_update.yml -e rollback_from=<this file>
+          {{ {'items': existing_gnp.resources | default([])} | to_nice_yaml }}
+      register: backup_file
+      when: rollback_from is not defined
+
+    - name: Report the backup location
+      ansible.builtin.debug:
+        msg: >-
+          Backed up {{ existing_gnp.resources | default([]) | length }} policy(ies)
+          to {{ backup_file.dest | default('(skipped for rollback run)') }}
+
+    # ---------------------------------------------------------------- rollback
+    - name: Restore policies from a backup
+      when: rollback_from is defined
+      block:
+        - name: Load the backup
+          ansible.builtin.include_vars:
+            file: "{{ rollback_from }}"
+            name: restore_set
+
+        - name: Re-apply every backed-up policy
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ item }}"
+          loop: "{{ restore_set['items'] | default([]) }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Stop after a successful rollback
+          ansible.builtin.meta: end_play
+
+    # ---------------------------------------------------------------- validate
+    - name: Find the policy files to apply
+      ansible.builtin.find:
+        paths: "{{ policy_dir }}"
+        patterns: ["*.yml", "*.yaml"]
+        recurse: true
+      register: policy_files
+
+    - name: Fail when the policy directory is empty
+      ansible.builtin.assert:
+        that: policy_files.files | length > 0
+        fail_msg: "No policy files found under {{ policy_dir }}"
+
+    - name: Load every policy definition
+      ansible.builtin.set_fact:
+        policies: >-
+          {{ policies | default([])
+             + (lookup('file', item.path) | from_yaml_all | select('defined') | list) }}
+      loop: "{{ policy_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Report what will be applied
+      ansible.builtin.debug:
+        msg: >-
+          {{ policies | length }} policy object(s):
+          {{ policies | map(attribute='metadata.name') | join(', ') }}
+
+    - name: Reject policies that would occupy the reserved platform order range
+      ansible.builtin.assert:
+        that:
+          - _reserved | length == 0
+        fail_msg: >-
+          These policies use an order below {{ reserved_order_below }}, which is
+          reserved for the platform tier and would take precedence over
+          cluster-critical rules: {{ _reserved | join(', ') }}
+        success_msg: "No policy intrudes on the reserved order range"
+      vars:
+        _reserved: >-
+          {{ policies
+             | selectattr('kind', 'eq', 'GlobalNetworkPolicy')
+             | selectattr('spec.order', 'defined')
+             | selectattr('spec.order', 'lt', reserved_order_below | float)
+             | rejectattr('metadata.labels.tier', 'eq', 'platform')
+             | map(attribute='metadata.name') | list }}
+
+    - name: Reject a cluster-wide default-deny that does not permit DNS
+      # A default-deny with no DNS egress allow is the single most common way to
+      # take a cluster down with one file.
+      ansible.builtin.assert:
+        that:
+          - _dns_allowed | length > 0 or _cluster_wide_deny | length == 0
+        fail_msg: >-
+          {{ _cluster_wide_deny | join(', ') }} applies a cluster-wide default deny
+          but no policy in this set allows egress to DNS (UDP/53). Applying this
+          would break name resolution for every pod.
+        success_msg: "Default-deny policies are accompanied by a DNS egress allow"
+      vars:
+        _cluster_wide_deny: >-
+          {{ policies
+             | selectattr('kind', 'eq', 'GlobalNetworkPolicy')
+             | selectattr('spec.selector', 'defined')
+             | selectattr('spec.selector', 'in', ['all()', 'has(projectcalico.org/namespace)'])
+             | selectattr('spec.types', 'defined')
+             | selectattr('spec.types', 'contains', 'Egress')
+             | map(attribute='metadata.name') | list }}
+        _dns_allowed: >-
+          {{ policies
+             | map(attribute='spec.egress', default=[]) | list | flatten
+             | selectattr('action', 'eq', 'Allow')
+             | selectattr('destination.ports', 'defined')
+             | selectattr('destination.ports', 'contains', 53)
+             | list }}
+
+    - name: Validate every policy server-side before applying any of them
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+        validate:
+          fail_on_error: true
+        apply: true
+      check_mode: true
+      diff: true
+      loop: "{{ policies }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+      register: validation
+
+    - name: Show the diff of what will change
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.kind }}/{{ item.item.metadata.name }}:
+          {{ 'no change' if not (item.changed | default(false)) else 'WILL CHANGE' }}
+      loop: "{{ validation.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.metadata.name }}"
+
+    # ------------------------------------------------------------------- apply
+    - name: Apply the policies in ascending order
+      # Ascending order means allow rules (low order) land before deny rules,
+      # so there is no window in which traffic is denied with no allow in place.
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+        apply: true
+      loop: >-
+        {{ policies | sort(attribute='spec.order', reverse=false)
+           if policies | selectattr('spec.order', 'defined') | list | length == policies | length
+           else policies }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }} (order {{ item.spec.order | default('none') }})"
+      when: not ansible_check_mode
+      register: applied
+
+    - name: Let the dataplane converge
+      ansible.builtin.pause:
+        seconds: "{{ settle_seconds }}"
+      when: not ansible_check_mode
+
+    # ------------------------------------------------------------------ verify
+    - name: Verify Calico is programming the policies
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ dns_namespace }}"
+        label_selectors:
+          - "k8s-app=calico-node"
+      register: calico_pods
+      when: not ansible_check_mode
+
+    - name: Check calico-node is still healthy after the change
+      ansible.builtin.assert:
+        that:
+          - _unhealthy | length == 0
+        fail_msg: "calico-node pods unhealthy after the policy change: {{ _unhealthy | join(', ') }}"
+        success_msg: "All calico-node pods are still Running"
+      vars:
+        _unhealthy: >-
+          {{ calico_pods.resources | default([])
+             | selectattr('status.phase', 'ne', 'Running')
+             | map(attribute='metadata.name') | list }}
+      when: not ansible_check_mode
+
+    - name: Verify DNS still resolves from inside the cluster
+      kubernetes.core.k8s_exec:
+        namespace: "{{ dns_namespace }}"
+        pod: "{{ (calico_pods.resources | first).metadata.name }}"
+        command: >-
+          timeout 10 nslookup kubernetes.default.svc.cluster.local
+      register: dns_check
+      changed_when: false
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - verify_dns | bool
+        - calico_pods.resources | default([]) | length > 0
+
+    - name: Roll back automatically if DNS broke
+      when:
+        - not ansible_check_mode
+        - auto_rollback | bool
+        - verify_dns | bool
+        - dns_check is defined
+        - dns_check.rc | default(0) != 0
+      block:
+        - name: Report the failure
+          ansible.builtin.debug:
+            msg: >-
+              DNS resolution failed after applying the policies. Rolling back to
+              {{ backup_file.dest }}.
+
+        - name: Restore the previous policy set
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ item }}"
+          loop: "{{ existing_gnp.resources | default([]) }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Fail the run after rolling back
+          ansible.builtin.fail:
+            msg: >-
+              {{ change_id }}: policy change rolled back — DNS resolution broke.
+              Review the policy set before retrying.
+
+    - name: Summarise
+      ansible.builtin.debug:
+        msg: >-
+          {{ change_id }}: {{ policies | length }} policy object(s)
+          {{ 'validated (check mode, nothing applied)' if ansible_check_mode
+             else 'applied and verified' }}.
+          Rollback: ansible-playbook calico_gnp_update.yml
+          -e rollback_from={{ backup_file.dest | default('<backup>') }}

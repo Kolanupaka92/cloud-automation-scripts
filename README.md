@@ -24,7 +24,13 @@ azure/
     workbooks/             Azure Monitor workbook (importable JSON)
     kql/                   the queries behind the workbook
   python/                  classic Azure: orphaned resources, NSG audit, AKS, rightsizing
-  ansible/                 VM baseline, AKS node pool upgrade, AKS workload health
+  ansible/                 resource stack, VM baseline, AKS upgrades and health
+storage/python/            Ceph OSD throttles, Pure Storage upgrade pre-flight
+kubernetes/                Calico GlobalNetworkPolicy updates and policy audit
+hardware/ansible/          firmware validation against an approved baseline
+security/                  certificate rotation, SentinelOne agent coverage
+network/python/            NTP health and packet-loss diagnosis
+airflow/dags/              migration waves as scheduled, resumable work
 common/
   ansible/roles/           shared roles used by more than one platform
 ```
@@ -41,6 +47,11 @@ common/
 | [`security_group_audit.py`](openstack/python/security_group_audit.py) | Ranks security group rules by real exposure — world-open admin ports first — and can gate a pipeline. |
 | [`upgrade_preflight.py`](openstack/python/upgrade_preflight.py) | The gate I run before every maintenance window: service liveness, version skew, stuck instances/volumes, orphaned migrations, quota headroom, and whether enough capacity exists to drain N hosts at once. |
 | [`prometheus_exporter.py`](openstack/python/prometheus_exporter.py) | Custom exporter for the cloud-level signals the node exporters miss: service and agent liveness, scheduler-visible capacity, instance/volume state backlogs, floating IP pool depletion. |
+| [`orphaned_instance_cleanup.py`](openstack/python/orphaned_instance_cleanup.py) | Reconciles Nova against libvirt on a compute node in both directions: domains running that Nova has no record of (silently overcommitting the host), instances Nova thinks are ACTIVE with no domain (a tenant outage nobody has noticed), and stale instance directories. |
+| [`compute_node_decommission.py`](openstack/python/compute_node_decommission.py) | Removes a node for good — aggregates, Nova services, Neutron agents and the Placement resource provider — then verifies nothing is left. Placement is the stage everyone forgets and the one that breaks scheduling months later. |
+| [`numa_topology_audit.py`](openstack/python/numa_topology_audit.py) | NUMA, CPU pinning and hugepage audit: pins landing outside `cpu_dedicated_set`, a dedicated set with no `isolcpus`, memory spanning sockets, hugepages allocated on only one node, unpinned emulator threads. All invisible to normal monitoring. |
+| [`network_onboarding.py`](openstack/python/network_onboarding.py) | Creates a tenant or provider network from a declarative YAML spec, validating everything first: VLAN free on the physical network, CIDR non-overlapping, pools inside the CIDR and clear of the gateway, MTU consistent with the segment. Idempotent and reversible. |
+| [`vmware_to_openstack_migrate.py`](openstack/python/vmware_to_openstack_migrate.py) | Per-VM VMware migration in journalled phases (assess → snapshot → export → convert → upload → provision → validate → cutover), preserving MAC and IP, picking a fitting flavor, and resumable with `--resume`. The source VM is powered off, never deleted. |
 
 | Playbook | What it does |
 | --- | --- |
@@ -85,6 +96,46 @@ is the only sanctioned control path to a bare metal machine.
 | [`azure_vm_baseline.yml`](azure/ansible/azure_vm_baseline.yml) | Standard VM with the baseline every workload should carry: managed identity, no public IP, deny-all-inbound NSG with management-only SSH, boot diagnostics, Azure Monitor agent. |
 | [`aks_nodepool_upgrade.yml`](azure/ansible/aks_nodepool_upgrade.yml) | Controlled AKS upgrade: pre-flight gate, control plane first, then node pools with user pools before system pools, waiting for every node to report Ready on the target version, then verifying workloads rescheduled. |
 | [`aks_workload_health.yml`](azure/ansible/aks_workload_health.yml) | Workload health using the same shared role as the OpenStack and Nexus checks, so findings are directly comparable across platforms. |
+| [`azure_resource_stack.yml`](azure/ansible/azure_resource_stack.yml) | A whole application stack — resource group, VNet with per-subnet NSGs, storage, key vault, VMs, diagnostics — from one spec, with every default set to the safe option. Public ingress, public blob access and public network access each require an explicit, reviewable override. |
+
+### Storage
+
+| Script | What it does |
+| --- | --- |
+| [`ceph_osd_throttle.py`](storage/python/ceph_osd_throttle.py) | Sets Ceph recovery and backfill throttles from a named profile (emergency → aggressive), refuses to raise them while the cluster is unhealthy, writes a restore point before every change, and can watch recovery throughput afterwards so the effect is measured rather than assumed. |
+| [`pure_upgrade_preflight.py`](storage/python/pure_upgrade_preflight.py) | Pure FlashArray pre-upgrade gate: API token validity and expiry (the check that saves a window from ending at minute one), VIP reachability probed **from the hosts that matter** rather than just the jump box, multipath redundancy per host, controller readiness, and version path sanity. |
+
+### Hardware and firmware
+
+| Playbook | What it does |
+| --- | --- |
+| [`firmware_validate.yml`](hardware/ansible/firmware_validate.yml) | Compares BIOS, BMC, NIC, RAID and disk firmware against a committed per-model baseline, and flags NICs on the same driver running mismatched firmware — the cause of one-sided packet loss that only appears under load. Remediation requires a change record and a drained host. |
+
+### Kubernetes networking
+
+| Artifact | What it does |
+| --- | --- |
+| [`calico_gnp_update.yml`](kubernetes/ansible/calico_gnp_update.yml) | GlobalNetworkPolicy updates done safely: back up first, validate all policies server-side before applying any, reject a default-deny with no DNS allow or an order intruding on the platform tier, apply in ascending order, verify DNS, and roll back automatically if it broke. |
+| [`calico_policy_audit.py`](kubernetes/python/calico_policy_audit.py) | Finds what `kubectl get` cannot: namespaces with no policy at all, policies shadowed by an earlier catch-all deny, duplicate order values making evaluation arbitrary, match-all selectors, and default-deny egress with no DNS exception. |
+
+### Security
+
+| Artifact | What it does |
+| --- | --- |
+| [`cert_rotation.yml`](security/ansible/cert_rotation.yml) | Certificate rotation that validates the new material *before* replacing the old: not expired, key actually matches the certificate, SANs still cover every endpoint. Backs up what it replaces, verifies each endpoint serves the new cert, and rolls back with one flag. |
+| [`sentinelone_agent_monitor.py`](security/python/sentinelone_agent_monitor.py) | Reconciles the SentinelOne console against the real infrastructure inventory, so hosts with no agent at all are visible — the gap a console-only view structurally cannot show. Also catches alert-only mitigation mode, stale check-ins, and (with `--verify-on-host`) consoles that claim healthy while the host disagrees. |
+
+### Networking
+
+| Script | What it does |
+| --- | --- |
+| [`ntp_health_check.py`](network/python/ntp_health_check.py) | Clock skew presents as something else entirely — flapping Ceph OSDs, rejected Kubernetes certificates, evicted Galera nodes. This reads chrony's reachability register to catch intermittent UDP/123 loss, plus stratum, offset, jitter, source redundancy, and the number that actually matters for a cluster: cross-host skew. |
+
+### Orchestration
+
+| Artifact | What it does |
+| --- | --- |
+| [`compute_migration_dag.py`](airflow/dags/compute_migration_dag.py) | An Airflow DAG turning a migration wave into scheduled, observable, resumable work: a region-wide pre-flight that short-circuits the wave if the cloud is unhealthy, one task group per host, a pool capping concurrent drains, per-stage retries (and deliberately none on drain), and a summary that fails unless every host finished. It shells out to the same scripts an operator runs by hand, so the manual and automated paths cannot drift. |
 
 ### Shared
 

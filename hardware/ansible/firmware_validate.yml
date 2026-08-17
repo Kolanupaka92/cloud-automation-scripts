@@ -1,0 +1,316 @@
+---
+# Validate and (optionally) remediate server firmware against an approved baseline.
+#
+#   ansible-playbook firmware_validate.yml                          # report only
+#   ansible-playbook firmware_validate.yml -l computes --check
+#   ansible-playbook firmware_validate.yml -e apply_updates=true \
+#       -e change_id=CHG0041827 -l compute-042
+#
+# Firmware drift is the quiet cause of the incidents nobody can reproduce: one
+# NIC on an older firmware than the rest of the fleet dropping packets under
+# load, one BIOS revision with different C-state behaviour ruining latency on a
+# single hypervisor. This compares every component against a committed baseline
+# and reports exactly which host is off it.
+#
+# Validation is always safe to run. Remediation requires apply_updates=true, a
+# change record, and a drained host — the playbook refuses otherwise, because a
+# firmware flash means a reboot.
+
+- name: Validate server firmware against the approved baseline
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ firmware_batch_size | default(1) }}"
+  max_fail_percentage: 0
+
+  vars:
+    apply_updates: false
+    change_id: unspecified
+    reboot_after_update: true
+    reboot_timeout: 1800
+    report_dir: "{{ playbook_dir }}/reports"
+
+    # The approved baseline. Keyed by hardware model so a mixed fleet works.
+    # Regenerate after a vendor bundle is approved, and commit the diff — the
+    # git history then is the firmware change record.
+    firmware_baseline:
+      "PowerEdge R650":
+        bios: "1.15.2"
+        idrac: "7.00.00.172"
+        nic_intel_e810: "4.40"
+        raid_perc_h755: "52.26.0-5179"
+      "PowerEdge R750":
+        bios: "1.14.0"
+        idrac: "7.00.00.172"
+        nic_mellanox_cx6: "22.39.2048"
+      "ProLiant DL380 Gen10":
+        bios: "U30 2.90"
+        ilo: "2.98"
+
+  pre_tasks:
+    - name: Detect the hardware model
+      ansible.builtin.set_fact:
+        hw_model: "{{ ansible_facts.product_name | default('unknown') | trim }}"
+
+    - name: Report the detected hardware
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ hw_model }}
+          (serial {{ ansible_facts.product_serial | default('unknown') }})
+
+    - name: Warn when the model has no baseline entry
+      ansible.builtin.debug:
+        msg: >-
+          No firmware baseline defined for '{{ hw_model }}'. Add it to
+          firmware_baseline before this host can be validated.
+      when: hw_model not in firmware_baseline
+
+  tasks:
+    - name: Collect BIOS version
+      ansible.builtin.set_fact:
+        fw_bios: "{{ ansible_facts.bios_version | default('unknown') | trim }}"
+
+    - name: Collect BMC (iDRAC/iLO) version
+      ansible.builtin.command: ipmitool mc info
+      register: bmc_info
+      changed_when: false
+      failed_when: false
+
+    - name: Parse the BMC firmware revision
+      ansible.builtin.set_fact:
+        fw_bmc: >-
+          {{ (bmc_info.stdout | default('') | regex_search('Firmware Revision\\s*:\\s*(\\S+)', '\\1')
+              | first | default('unknown')) }}
+
+    - name: Collect NIC firmware for every physical interface
+      ansible.builtin.shell: |
+        set -o pipefail
+        for nic in $(ls /sys/class/net); do
+          [ -e "/sys/class/net/$nic/device" ] || continue
+          ver=$(ethtool -i "$nic" 2>/dev/null | awk -F': ' '/^firmware-version/{print $2}')
+          drv=$(ethtool -i "$nic" 2>/dev/null | awk -F': ' '/^driver/{print $2}')
+          [ -n "$ver" ] && echo "$nic|$drv|$ver"
+        done
+      args:
+        executable: /bin/bash
+      register: nic_firmware
+      changed_when: false
+      failed_when: false
+
+    - name: Collect storage controller firmware
+      ansible.builtin.shell: |
+        set -o pipefail
+        if command -v storcli64 >/dev/null 2>&1; then
+          storcli64 /c0 show | awk -F'= ' '/FW Package Build/{print $2}'
+        elif command -v ssacli >/dev/null 2>&1; then
+          ssacli ctrl all show detail | awk -F': ' '/Firmware Version/{print $2; exit}'
+        fi
+      args:
+        executable: /bin/bash
+      register: raid_firmware
+      changed_when: false
+      failed_when: false
+
+    - name: Collect disk firmware revisions
+      ansible.builtin.shell: |
+        set -o pipefail
+        for dev in /dev/sd? /dev/nvme?n1; do
+          [ -b "$dev" ] || continue
+          smartctl -i "$dev" 2>/dev/null \
+            | awk -F': +' '/Firmware Version|Revision/{print "'"$dev"'|" $2; exit}'
+        done
+      args:
+        executable: /bin/bash
+      register: disk_firmware
+      changed_when: false
+      failed_when: false
+
+    - name: Build this host's firmware inventory
+      ansible.builtin.set_fact:
+        firmware_inventory:
+          host: "{{ inventory_hostname }}"
+          model: "{{ hw_model }}"
+          serial: "{{ ansible_facts.product_serial | default('unknown') }}"
+          bios: "{{ fw_bios }}"
+          bmc: "{{ fw_bmc }}"
+          nics: >-
+            {{ nic_firmware.stdout_lines | default([])
+               | map('split', '|') | list }}
+          raid: "{{ raid_firmware.stdout | default('') | trim | default('none', true) }}"
+          disks: >-
+            {{ disk_firmware.stdout_lines | default([])
+               | map('split', '|') | list }}
+
+    - name: Compare BIOS against the baseline
+      ansible.builtin.set_fact:
+        firmware_findings: >-
+          {{ firmware_findings | default([]) + [{
+               'severity': 'WARN',
+               'component': 'bios',
+               'expected': firmware_baseline[hw_model].bios,
+               'actual': fw_bios,
+               'finding': 'BIOS is not on the approved baseline'
+             }] }}
+      when:
+        - hw_model in firmware_baseline
+        - firmware_baseline[hw_model].bios is defined
+        - fw_bios != firmware_baseline[hw_model].bios
+
+    - name: Compare BMC against the baseline
+      ansible.builtin.set_fact:
+        firmware_findings: >-
+          {{ firmware_findings | default([]) + [{
+               'severity': 'WARN',
+               'component': 'bmc',
+               'expected': _expected_bmc,
+               'actual': fw_bmc,
+               'finding': 'BMC firmware is not on the approved baseline'
+             }] }}
+      vars:
+        _expected_bmc: >-
+          {{ firmware_baseline[hw_model].idrac
+             | default(firmware_baseline[hw_model].ilo | default('')) }}
+      when:
+        - hw_model in firmware_baseline
+        - _expected_bmc | length > 0
+        - fw_bmc != _expected_bmc
+
+    - name: Flag drivers whose NICs run mismatched firmware
+      # Two NICs on the same driver running different firmware is the classic
+      # cause of one-sided packet loss that only shows up under load.
+      ansible.builtin.set_fact:
+        firmware_findings: >-
+          {{ firmware_findings | default([]) + [{
+               'severity': 'CRITICAL',
+               'component': 'nic-consistency',
+               'expected': 'one firmware version per driver',
+               'actual': item.0 ~ ': ' ~ (_versions | join(', ')),
+               'finding': 'NICs using driver ' ~ item.0 ~ ' run different firmware versions'
+             }] }}
+      vars:
+        _versions: "{{ item.1 | map(attribute=2) | unique | list }}"
+      loop: >-
+        {{ nic_firmware.stdout_lines | default([])
+           | map('split', '|') | list | groupby(1) }}
+      loop_control:
+        label: "{{ item.0 }}"
+      when: _versions | length > 1
+
+    - name: Report this host's firmware status
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ hw_model }}):
+          BIOS {{ fw_bios }}, BMC {{ fw_bmc }},
+          {{ nic_firmware.stdout_lines | default([]) | length }} NIC(s),
+          RAID {{ firmware_inventory.raid }} —
+          {{ 'ON BASELINE' if (firmware_findings | default([])) | length == 0
+             else ((firmware_findings | length) ~ ' deviation(s): '
+                   ~ (firmware_findings | map(attribute='component') | join(', '))) }}
+
+    # ---------------------------------------------------------------- remediation
+    - name: Refuse to flash firmware without a change record
+      ansible.builtin.assert:
+        that: change_id != 'unspecified'
+        fail_msg: "Firmware updates require -e change_id=CHG####### (a flash means a reboot)."
+      when: apply_updates | bool
+
+    - name: Confirm the host is drained before flashing
+      ansible.builtin.command: virsh list --name --state-running
+      register: running_domains
+      changed_when: false
+      failed_when: false
+      when: apply_updates | bool
+
+    - name: Refuse to flash a host that still runs workloads
+      ansible.builtin.assert:
+        that:
+          - (running_domains.stdout_lines | default([]) | reject('equalto', '') | list | length) == 0
+        fail_msg: >-
+          {{ inventory_hostname }} still runs
+          {{ running_domains.stdout_lines | reject('equalto', '') | list | length }} domain(s).
+          Drain it first with openstack/python/compute_node_drain.py.
+      when:
+        - apply_updates | bool
+        - running_domains is defined
+        - running_domains.rc | default(1) == 0
+
+    - name: Apply the vendor firmware bundle
+      ansible.builtin.command: >-
+        {{ firmware_update_command }}
+      register: firmware_update
+      changed_when: firmware_update.rc == 0
+      when:
+        - apply_updates | bool
+        - firmware_update_command is defined
+        - (firmware_findings | default([])) | length > 0
+
+    - name: Reboot to activate the new firmware
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        msg: "{{ change_id }} firmware activation"
+      when:
+        - apply_updates | bool
+        - reboot_after_update | bool
+        - firmware_update is defined
+        - firmware_update.changed | default(false)
+
+    - name: Re-read BIOS version after the reboot
+      ansible.builtin.setup:
+        gather_subset: hardware
+      when:
+        - apply_updates | bool
+        - firmware_update is defined
+        - firmware_update.changed | default(false)
+
+    - name: Confirm the firmware now matches the baseline
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.bios_version | trim == firmware_baseline[hw_model].bios
+        fail_msg: >-
+          After the update, BIOS is {{ ansible_facts.bios_version }} but the baseline
+          is {{ firmware_baseline[hw_model].bios }}. The flash did not take.
+        success_msg: "{{ inventory_hostname }} is now on the approved firmware baseline"
+      when:
+        - apply_updates | bool
+        - hw_model in firmware_baseline
+        - firmware_update is defined
+        - firmware_update.changed | default(false)
+
+
+- name: Publish the fleet firmware report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    report_time: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+  tasks:
+    - name: Ensure the report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir | default(playbook_dir ~ '/reports') }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write the firmware inventory and deviations
+      ansible.builtin.copy:
+        dest: "{{ report_dir | default(playbook_dir ~ '/reports') }}/firmware-{{ report_time }}.json"
+        mode: "0640"
+        content: >-
+          {{ {
+               'generated_at': report_time,
+               'hosts': ansible_play_hosts_all
+                        | map('extract', hostvars, 'firmware_inventory')
+                        | select('defined') | list,
+               'deviations': dict(ansible_play_hosts_all | zip(
+                   ansible_play_hosts_all
+                   | map('extract', hostvars, 'firmware_findings') | list))
+             } | to_nice_json }}
+
+    - name: Summarise hosts off the baseline
+      ansible.builtin.debug:
+        msg: >-
+          {{ item }}: {{ hostvars[item].firmware_findings | map(attribute='component') | join(', ') }}
+      loop: "{{ ansible_play_hosts_all }}"
+      when:
+        - hostvars[item].firmware_findings is defined
+        - hostvars[item].firmware_findings | length > 0
