@@ -30,8 +30,13 @@ from collections import Counter
 from common import LOG, base_parser, connect, setup_logging
 
 try:
-    from prometheus_client import REGISTRY, Gauge, Counter as PromCounter, start_http_server
-    from prometheus_client import generate_latest
+    from prometheus_client import (
+        REGISTRY,
+        Counter as PromCounter,
+        Gauge,
+        generate_latest,
+        start_http_server,
+    )
 except ImportError:  # pragma: no cover - dependency guard
     sys.exit("prometheus_client is not installed. Run: pip install -r requirements.txt")
 
