@@ -126,6 +126,87 @@ def confirm(prompt: str, assume_yes: bool = False) -> bool:
     return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
 
+def placement_capacity(conn) -> dict[str, dict[str, dict[str, float]]]:
+    """Capacity per compute node, straight from Placement.
+
+    Placement is the authoritative source and the only one that still works on
+    modern clouds: Nova stopped returning ``vcpus``, ``memory_mb`` and friends
+    on the hypervisor API at microversion 2.88, so anything built on those
+    fields silently reports zeros. Returns
+
+        {provider_name: {resource_class: {"total", "reserved",
+                                          "allocation_ratio", "used"}}}
+
+    and an empty map when Placement is unreachable, so callers can fall back to
+    the legacy hypervisor fields on an older deployment.
+    """
+    capacity: dict[str, dict[str, dict[str, float]]] = {}
+    try:
+        providers = list(conn.placement.resource_providers())
+    except Exception as exc:  # noqa: BLE001 - older clouds or restricted creds
+        LOG.warning("Placement unavailable (%s); falling back to hypervisor fields", exc)
+        return capacity
+
+    for provider in providers:
+        try:
+            inventories = list(conn.placement.resource_provider_inventories(provider))
+            usages = conn.placement.fetch_resource_provider_usages(provider)
+        except Exception as exc:  # noqa: BLE001 - one provider must not stop the sweep
+            LOG.debug("provider %s inventory unavailable: %s", provider.name, exc)
+            continue
+
+        used_by_class = getattr(usages, "usages", None) or {}
+        capacity[provider.name] = {
+            inv.resource_class: {
+                "total": float(inv.total or 0),
+                "reserved": float(inv.reserved or 0),
+                "allocation_ratio": float(inv.allocation_ratio or 1.0),
+                "used": float(used_by_class.get(inv.resource_class, 0) or 0),
+            }
+            for inv in inventories
+        }
+    return capacity
+
+
+EMPTY_CLASS = {"total": 0.0, "reserved": 0.0, "allocation_ratio": 1.0, "used": 0.0}
+
+
+def usable(entry: dict[str, float]) -> float:
+    """Schedulable capacity for one resource class: (total - reserved) * ratio."""
+    return (entry["total"] - entry["reserved"]) * entry["allocation_ratio"]
+
+
+def host_capacity(conn, hypervisors, capacity=None) -> dict[str, dict[str, float]]:
+    """Per-host free/used/total vCPU and memory, preferring Placement.
+
+    One implementation shared by the capacity report, the drain pre-flight and
+    the upgrade gate, so all three agree on what "free" means.
+    """
+    capacity = placement_capacity(conn) if capacity is None else capacity
+    result: dict[str, dict[str, float]] = {}
+
+    for hv in hypervisors:
+        provider = capacity.get(hv.name)
+        if provider:
+            vcpu = provider.get("VCPU", EMPTY_CLASS)
+            mem = provider.get("MEMORY_MB", EMPTY_CLASS)
+            vcpu_total, vcpu_used = usable(vcpu), vcpu["used"]
+            mem_total, mem_used = usable(mem), mem["used"]
+            source = "placement"
+        else:
+            vcpu_total, vcpu_used = float(hv.vcpus or 0), float(hv.vcpus_used or 0)
+            mem_total, mem_used = float(hv.memory_size or 0), float(hv.memory_used or 0)
+            source = "nova"
+        result[hv.name] = {
+            "vcpu_total": vcpu_total, "vcpu_used": vcpu_used,
+            "vcpu_free": vcpu_total - vcpu_used,
+            "mem_total": mem_total, "mem_used": mem_used,
+            "mem_free": mem_total - mem_used,
+            "source": source,
+        }
+    return result
+
+
 def pct(used: float, total: float) -> float:
     """Percentage that tolerates a zero denominator (empty/erroring hosts)."""
     return round((used / total) * 100, 1) if total else 0.0

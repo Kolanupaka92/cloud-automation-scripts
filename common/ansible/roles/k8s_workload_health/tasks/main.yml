@@ -46,13 +46,15 @@
            'finding': _reasons | join('; ')
          }] }}
   vars:
-    _pressure: >-
-      {{ item.status.conditions
-         | selectattr('type', 'in', k8s_health_bad_node_conditions)
-         | selectattr('status', 'eq', 'True')
-         | map(attribute='type') | list }}
+    # Built as one expression: chaining through an intermediate var would render
+    # the first result to a string, and "string + list" fails at runtime.
     _reasons: >-
-      {{ _pressure + (['cordoned (unschedulable)'] if item.spec.unschedulable | default(false) else []) }}
+      {{ (item.status.conditions
+          | selectattr('type', 'in', k8s_health_bad_node_conditions)
+          | selectattr('status', 'eq', 'True')
+          | map(attribute='type') | list)
+         + (['cordoned (unschedulable)']
+            if item.spec.unschedulable | default(false) else []) }}
   loop: "{{ k8s_nodes.resources | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }}"

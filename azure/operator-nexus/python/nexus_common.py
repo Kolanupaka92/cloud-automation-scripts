@@ -112,29 +112,65 @@ def list_machines(nc: NetworkCloudMgmtClient, args) -> list:
         sys.exit(f"Failed to list bare metal machines: {exc.message or exc}")
 
     if args.cluster:
-        machines = [m for m in machines if (m.cluster_id or "").rstrip("/").split("/")[-1] == args.cluster]
-    if args.rack:
         machines = [
             m for m in machines
-            if args.rack.lower() in (m.rack_id or "").lower()
+            if text(prop(m, "cluster_id")).rstrip("/").split("/")[-1] == args.cluster
         ]
+    if args.rack:
+        machines = [m for m in machines if args.rack.lower() in text(prop(m, "rack_id")).lower()]
     if args.machine:
         wanted = {name.lower() for name in args.machine}
-        machines = [m for m in machines if (m.machine_name or m.name or "").lower() in wanted]
+        machines = [m for m in machines if machine_name(m).lower() in wanted]
 
     machines.sort(key=lambda m: (rack_name(m), rack_slot(m)))
     return machines
 
 
+def prop(resource, name: str, default=None):
+    """Read a resource field across both SDK model generations.
+
+    azure-mgmt-networkcloud 3.x nests every field under ``resource.properties``;
+    1.x and 2.x expose them flat on the resource. Reading through this accessor
+    means the scripts work with whichever version a site has pinned, instead of
+    breaking silently on upgrade — every field would simply read as None.
+    """
+    properties = getattr(resource, "properties", None)
+    if properties is not None and hasattr(properties, name):
+        value = getattr(properties, name)
+        if value is not None:
+            return value
+    value = getattr(resource, name, None)
+    return default if value is None else value
+
+
+def text(value, default: str = "") -> str:
+    """Normalise an SDK field to a plain string.
+
+    The Network Cloud models return ``str``-mixin enums, and ``str(enum)`` gives
+    "BareMetalMachineReadyState.TRUE" rather than "True" on modern Python. The
+    same field arrives as a bare string from other code paths, so every
+    comparison goes through here — otherwise a healthy machine reads as
+    unhealthy and a maintenance window refuses to start for no reason.
+    """
+    if value is None:
+        return default
+    return str(getattr(value, "value", value))
+
+
 def rack_name(machine) -> str:
-    return (machine.rack_id or "-").rstrip("/").split("/")[-1]
+    return (text(prop(machine, "rack_id")) or "-").rstrip("/").split("/")[-1]
 
 
 def rack_slot(machine) -> int:
     try:
-        return int(machine.rack_slot)
+        return int(prop(machine, "rack_slot"))
     except (TypeError, ValueError):
         return 0
+
+
+def machine_name(machine) -> str:
+    """The BMM's own name, falling back to the ARM resource name."""
+    return text(prop(machine, "machine_name")) or getattr(machine, "name", "unknown")
 
 
 def machine_rg(machine) -> str:
@@ -146,38 +182,40 @@ def machine_rg(machine) -> str:
 
 
 def is_healthy(machine) -> bool:
-    return (
-        str(machine.ready_state) in HEALTHY_READY_STATES
-        and (machine.detailed_status or "") in HEALTHY_DETAILED_STATUS
-        and (machine.power_state or "") == POWERED_ON
-        and (machine.cordon_status or "Uncordoned") == "Uncordoned"
-    )
+    return not health_summary(machine)
 
 
 def health_summary(machine) -> list[str]:
     """Human-readable reasons a machine is not fully healthy (empty when it is)."""
     problems = []
-    if str(machine.ready_state) not in HEALTHY_READY_STATES:
-        problems.append(f"readyState={machine.ready_state}")
-    if (machine.detailed_status or "") not in HEALTHY_DETAILED_STATUS:
-        detail = machine.detailed_status_message or "no message"
-        problems.append(f"detailedStatus={machine.detailed_status} ({detail})")
-    if (machine.power_state or "") != POWERED_ON:
-        problems.append(f"powerState={machine.power_state}")
-    if (machine.cordon_status or "Uncordoned") != "Uncordoned":
+    ready = prop(machine, "ready_state")
+    detailed = prop(machine, "detailed_status", "")
+    power = prop(machine, "power_state", "")
+    cordon = prop(machine, "cordon_status", "Uncordoned")
+
+    if text(ready) not in HEALTHY_READY_STATES:
+        problems.append(f"readyState={text(ready)}")
+    if text(detailed) not in HEALTHY_DETAILED_STATUS:
+        message = prop(machine, "detailed_status_message", "no message")
+        problems.append(f"detailedStatus={text(detailed)} ({message})")
+    if text(power) != POWERED_ON:
+        problems.append(f"powerState={text(power)}")
+    if text(cordon) != "Uncordoned":
         problems.append("cordoned")
-    hardware = getattr(machine, "hardware_validation_status", None)
-    if hardware and getattr(hardware, "result", None) not in (None, "Pass"):
-        problems.append(f"hardwareValidation={hardware.result}")
+
+    hardware = prop(machine, "hardware_validation_status")
+    result = getattr(hardware, "result", None) if hardware is not None else None
+    if result is not None and text(result) != "Pass":
+        problems.append(f"hardwareValidation={text(result)}")
     return problems
 
 
 def workload_count(machine) -> int:
     """Tenant VMs currently hosted on this BMM."""
-    return len(getattr(machine, "virtual_machines_associated_ids", None) or [])
+    return len(prop(machine, "virtual_machines_associated_ids") or [])
 
 
-def run_read_commands(nc, resource_group: str, machine_name: str, commands, timeout: int = 600):
+def run_read_commands(nc, resource_group: str, name: str, commands, timeout: int = 600):
     """Execute allow-listed read-only commands on a BMM via the Nexus RP.
 
     Only commands on the Operator Nexus read-only allow list are accepted by the
@@ -200,11 +238,11 @@ def run_read_commands(nc, resource_group: str, machine_name: str, commands, time
     )
     try:
         poller = nc.bare_metal_machines.begin_run_read_commands(
-            resource_group, machine_name, params
+            resource_group, name, params
         )
         return poller.result()
     except (HttpResponseError, ResourceNotFoundError) as exc:
-        LOG.error("run-read-commands failed on %s: %s", machine_name, exc.message or exc)
+        LOG.error("run-read-commands failed on %s: %s", name, exc.message or exc)
         return None
 
 

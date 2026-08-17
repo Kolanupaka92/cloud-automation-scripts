@@ -38,3 +38,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Test artifacts
+.pytest_cache/

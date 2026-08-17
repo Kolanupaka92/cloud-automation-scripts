@@ -42,11 +42,14 @@ from nexus_common import (
     confirm,
     health_summary,
     list_machines,
+    machine_name,
     machine_rg,
+    prop,
     rack_name,
     rack_slot,
     render,
     setup_logging,
+    text,
     workload_count,
 )
 
@@ -112,7 +115,8 @@ def wait_for(nc, resource_group: str, name: str, predicate, description: str,
             return True
         LOG.debug(
             "    %s: waiting (%s, power=%s, ready=%s)",
-            name, machine.detailed_status, machine.power_state, machine.ready_state,
+            name, text(prop(machine, "detailed_status")), text(prop(machine, "power_state")),
+            text(prop(machine, "ready_state")),
         )
         time.sleep(interval)
     LOG.error("    %s: timed out waiting for %s after %ss", name, description, timeout)
@@ -124,7 +128,7 @@ def rack_has_headroom(nc, args, target_machine_name: str) -> bool:
     peers = list_machines(nc, args)
     target_rack = None
     for machine in peers:
-        if (machine.machine_name or machine.name) == target_machine_name:
+        if machine_name(machine) == target_machine_name:
             target_rack = rack_name(machine)
             break
     if target_rack is None:
@@ -133,7 +137,7 @@ def rack_has_headroom(nc, args, target_machine_name: str) -> bool:
     in_rack = [m for m in peers if rack_name(m) == target_rack]
     healthy_others = [
         m for m in in_rack
-        if (m.machine_name or m.name) != target_machine_name and not health_summary(m)
+        if machine_name(m) != target_machine_name and not health_summary(m)
     ]
     ok = len(healthy_others) >= args.min_healthy_per_rack
     if not ok:
@@ -147,10 +151,12 @@ def rack_has_headroom(nc, args, target_machine_name: str) -> bool:
 def do_cordon(nc, rg, name, args, evacuate: bool) -> bool:
     params = BareMetalMachineCordonParameters(evacuate="True" if evacuate else "False")
     LOG.info("    cordoning %s (evacuate=%s)", name, evacuate)
-    nc.bare_metal_machines.begin_cordon(rg, name, cordon_parameters=params).result()
+    nc.bare_metal_machines.begin_cordon(
+        rg, name, bare_metal_machine_cordon_parameters=params
+    ).result()
     return wait_for(
         nc, rg, name,
-        lambda m: (m.cordon_status or "") == "Cordoned",
+        lambda m: text(prop(m, "cordon_status", "")) == "Cordoned",
         "cordoned", args.cordon_timeout, args.poll,
     )
 
@@ -160,7 +166,7 @@ def do_uncordon(nc, rg, name, args) -> bool:
     nc.bare_metal_machines.begin_uncordon(rg, name).result()
     return wait_for(
         nc, rg, name,
-        lambda m: (m.cordon_status or "Uncordoned") == "Uncordoned",
+        lambda m: text(prop(m, "cordon_status", "Uncordoned")) == "Uncordoned",
         "uncordoned", args.cordon_timeout, args.poll,
     )
 
@@ -170,10 +176,12 @@ def do_power_off(nc, rg, name, args) -> bool:
         skip_shutdown="True" if args.skip_shutdown else "False"
     )
     LOG.info("    powering off %s (graceful=%s)", name, not args.skip_shutdown)
-    nc.bare_metal_machines.begin_power_off(rg, name, bare_metal_machine_power_off_parameters=params).result()
+    nc.bare_metal_machines.begin_power_off(
+        rg, name, bare_metal_machine_power_off_parameters=params
+    ).result()
     return wait_for(
         nc, rg, name,
-        lambda m: (m.power_state or "") == "Off",
+        lambda m: text(prop(m, "power_state", "")) == "Off",
         "powered off", args.power_timeout, args.poll,
     )
 
@@ -183,7 +191,7 @@ def do_power_on(nc, rg, name, args) -> bool:
     nc.bare_metal_machines.begin_start(rg, name).result()
     return wait_for(
         nc, rg, name,
-        lambda m: (m.power_state or "") == "On",
+        lambda m: text(prop(m, "power_state", "")) == "On",
         "powered on", args.power_timeout, args.poll,
     )
 
@@ -192,8 +200,8 @@ def do_wait_ready(nc, rg, name, args) -> bool:
     LOG.info("    waiting for %s to rejoin the cluster", name)
     return wait_for(
         nc, rg, name,
-        lambda m: str(m.ready_state) == "True" and (m.detailed_status or "") in
-                  ("Available", "Provisioned"),
+        lambda m: text(prop(m, "ready_state")) == "True"
+                  and text(prop(m, "detailed_status", "")) in ("Available", "Provisioned"),
         "ready and available", args.ready_timeout, args.poll,
     )
 
@@ -209,7 +217,7 @@ def do_verify(nc, rg, name, args) -> bool:
 
 
 def maintain_machine(nc, machine, args, state: MaintenanceState) -> dict:
-    name = machine.machine_name or machine.name
+    name = machine_name(machine)
     rg = machine_rg(machine)
     tenant_vms = workload_count(machine)
 
@@ -217,8 +225,8 @@ def maintain_machine(nc, machine, args, state: MaintenanceState) -> dict:
         "machine": name,
         "rack": rack_name(machine),
         "slot": rack_slot(machine),
-        "power": machine.power_state,
-        "cordon": machine.cordon_status or "Uncordoned",
+        "power": text(prop(machine, "power_state")),
+        "cordon": text(prop(machine, "cordon_status"), "Uncordoned"),
         "tenant_vms": tenant_vms,
         "step": "-",
         "result": "-",
@@ -348,8 +356,9 @@ def main() -> int:
     for machine in machines:
         LOG.info(
             "  %s (rack %s slot %s) power=%s cordon=%s tenantVMs=%d",
-            machine.machine_name or machine.name, rack_name(machine), rack_slot(machine),
-            machine.power_state, machine.cordon_status or "Uncordoned", workload_count(machine),
+            machine_name(machine), rack_name(machine), rack_slot(machine),
+            text(prop(machine, "power_state")), text(prop(machine, "cordon_status"), "Uncordoned"),
+            workload_count(machine),
         )
 
     if not args.dry_run and not confirm(

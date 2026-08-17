@@ -10,6 +10,8 @@ keystoneauth1>=5.4.0
 azure-identity>=1.15.0
 azure-core>=1.30.0
 azure-mgmt-resource>=23.0.0
+# SubscriptionClient moved out of azure-mgmt-resource; it now ships here.
+azure-mgmt-subscription>=3.1.1
 
 # --- Azure: classic IaaS / AKS --------------------------------------------
 azure-mgmt-compute>=30.0.0

@@ -37,11 +37,14 @@ from nexus_common import (
     base_parser,
     client,
     list_machines,
+    machine_name,
     machine_rg,
+    prop,
     rack_name,
     render,
     run_read_commands,
     setup_logging,
+    text,
 )
 
 COLUMNS = ("severity", "machine", "rack", "check", "subject", "finding")
@@ -73,11 +76,11 @@ def finding(severity, machine, rack, check, subject, text) -> dict:
 
 def audit_control_plane(machine) -> list[dict]:
     """Everything derivable from the BMM resource itself — always available."""
-    name = machine.machine_name or machine.name
+    name = machine_name(machine)
     rack = rack_name(machine)
     rows = []
 
-    hardware = getattr(machine, "hardware_validation_status", None)
+    hardware = prop(machine, "hardware_validation_status")
     if hardware is not None:
         result = getattr(hardware, "result", None)
         if result and result != "Pass":
@@ -87,26 +90,26 @@ def audit_control_plane(machine) -> list[dict]:
                 f"(last run {getattr(hardware, 'last_validation_time', 'unknown')})",
             ))
 
-    status = machine.detailed_status or ""
+    status = text(prop(machine, "detailed_status", ""))
     if status not in ("Available", "Provisioned"):
         rows.append(finding(
             "CRITICAL", name, rack, "platform", "detailedStatus",
-            f"{status}: {machine.detailed_status_message or 'no message'}",
+            f"{status}: {prop(machine, 'detailed_status_message', 'no message')}",
         ))
 
-    if str(machine.ready_state) != "True":
+    if text(prop(machine, "ready_state")) != "True":
         rows.append(finding(
             "CRITICAL", name, rack, "platform", "readyState",
-            f"readyState={machine.ready_state}",
+            f"readyState={text(prop(machine, 'ready_state'))}",
         ))
 
-    if (machine.power_state or "") != "On":
+    if text(prop(machine, "power_state", "")) != "On":
         rows.append(finding(
             "WARN", name, rack, "platform", "powerState",
-            f"powerState={machine.power_state}",
+            f"powerState={text(prop(machine, 'power_state'))}",
         ))
 
-    if (machine.cordon_status or "Uncordoned") != "Uncordoned":
+    if text(prop(machine, "cordon_status", "Uncordoned")) != "Uncordoned":
         rows.append(finding(
             "WARN", name, rack, "platform", "cordonStatus",
             "machine is cordoned — check whether a maintenance window was left open",
@@ -127,21 +130,22 @@ def audit_storage_appliances(nc, args) -> list[dict]:
 
     for appliance in appliances:
         name = appliance.name
-        rack = (appliance.rack_id or "-").rstrip("/").split("/")[-1]
-        status = appliance.detailed_status or ""
+        rack = (prop(appliance, "rack_id") or "-").rstrip("/").split("/")[-1]
+        status = text(prop(appliance, "detailed_status", ""))
         if status not in ("Available", "Provisioned"):
             rows.append(finding(
                 "CRITICAL", name, rack, "storage", "appliance",
-                f"detailedStatus={status}: {appliance.detailed_status_message or 'no message'}",
+                f"detailedStatus={status}: "
+                f"{prop(appliance, 'detailed_status_message', 'no message')}",
             ))
-        capacity = getattr(appliance, "remote_vendor_management_status", None)
+        capacity = prop(appliance, "remote_vendor_management_status")
         if capacity and str(capacity) != "Enabled":
             rows.append(finding(
                 "WARN", name, rack, "storage", "vendor-management",
-                f"remote vendor management is {capacity}",
+                f"remote vendor management is {text(capacity)}",
             ))
-        total = getattr(appliance, "capacity", None)
-        used = getattr(appliance, "capacity_used", None)
+        total = prop(appliance, "capacity")
+        used = prop(appliance, "capacity_used")
         if total and used:
             pct = round(used / total * 100, 1)
             severity = "CRITICAL" if pct >= 90 else "WARN" if pct >= 80 else "INFO"
@@ -152,10 +156,10 @@ def audit_storage_appliances(nc, args) -> list[dict]:
     return rows
 
 
-def parse_disk_output(text: str, name: str, rack: str) -> list[dict]:
+def parse_disk_output(output: str, name: str, rack: str) -> list[dict]:
     """Extract disk problems from the collected hardware/mdadm output."""
     rows = []
-    lowered = text.lower()
+    lowered = output.lower()
 
     for pattern, severity, label in (
         (r"\b(failed|failure predicted|predictive failure)\b", "CRITICAL", "drive failure"),
@@ -165,13 +169,13 @@ def parse_disk_output(text: str, name: str, rack: str) -> list[dict]:
         (r"\bmedia errors?\s*[:=]\s*[1-9]", "WARN", "media errors present"),
     ):
         for match in re.finditer(pattern, lowered):
-            line = text[max(0, match.start() - 80): match.end() + 80].replace("\n", " ").strip()
+            line = output[max(0, match.start() - 80): match.end() + 80].replace("\n", " ").strip()
             rows.append(finding("CRITICAL" if severity == "CRITICAL" else "WARN",
                                 name, rack, "disk", label, line[:160]))
             break  # one finding per pattern; the full output goes in the ticket
 
     # Filesystem utilisation lines look like: /dev/sda1  100G  92G  8G  92% /
-    for match in re.finditer(r"(\S+)\s+[\d.]+[GTM]\s+[\d.]+[GTM]\s+[\d.]+[GTM]\s+(\d+)%\s+(\S+)", text):
+    for match in re.finditer(r"(\S+)\s+[\d.]+[GTM]\s+[\d.]+[GTM]\s+[\d.]+[GTM]\s+(\d+)%\s+(\S+)", output):
         pct = int(match.group(2))
         if pct >= 85:
             rows.append(finding(
@@ -181,16 +185,16 @@ def parse_disk_output(text: str, name: str, rack: str) -> list[dict]:
     return rows
 
 
-def parse_network_output(text: str, name: str, rack: str) -> list[dict]:
+def parse_network_output(output: str, name: str, rack: str) -> list[dict]:
     """Extract link, bond and error-counter problems from interface output."""
     rows = []
 
-    for match in re.finditer(r"^(\S+):.*state (DOWN|LOWERLAYERDOWN)", text, re.MULTILINE):
+    for match in re.finditer(r"^(\S+):.*state (DOWN|LOWERLAYERDOWN)", output, re.MULTILINE):
         rows.append(finding("CRITICAL", name, rack, "network", match.group(1),
                             f"interface state {match.group(2)}"))
 
-    for match in re.finditer(r"MII Status:\s*down", text, re.IGNORECASE):
-        context = text[max(0, match.start() - 200): match.start()]
+    for match in re.finditer(r"MII Status:\s*down", output, re.IGNORECASE):
+        context = output[max(0, match.start() - 200): match.start()]
         slave = re.findall(r"Slave Interface:\s*(\S+)", context)
         rows.append(finding("CRITICAL", name, rack, "network",
                             slave[-1] if slave else "bond",
@@ -200,7 +204,7 @@ def parse_network_output(text: str, name: str, rack: str) -> list[dict]:
                            ("tx errors", r"TX errors?\s+(\d+)"),
                            ("rx dropped", r"RX .*dropped\s+(\d+)"),
                            ("tx dropped", r"TX .*dropped\s+(\d+)")):
-        for match in re.finditer(pattern, text):
+        for match in re.finditer(pattern, output):
             count = int(match.group(1))
             if count > 0:
                 rows.append(finding("WARN" if count < 1000 else "CRITICAL",
@@ -208,24 +212,24 @@ def parse_network_output(text: str, name: str, rack: str) -> list[dict]:
                                     f"{count} {label} since boot"))
                 break
 
-    mtus = set(re.findall(r"mtu (\d+)", text))
+    mtus = set(re.findall(r"mtu (\d+)", output))
     if len(mtus) > 2:  # loopback plus one data MTU is normal
         rows.append(finding("WARN", name, rack, "network", "mtu",
                             f"inconsistent MTUs across interfaces: {', '.join(sorted(mtus))}"))
 
-    if re.search(r"100% packet loss", text):
+    if re.search(r"100% packet loss", output):
         rows.append(finding("CRITICAL", name, rack, "network", "reachability",
                             "100% packet loss on the connectivity probe"))
     return rows
 
 
 def audit_on_machine(nc, machine, checks: list[str], timeout: int) -> list[dict]:
-    name = machine.machine_name or machine.name
+    name = machine_name(machine)
     rack = rack_name(machine)
     rg = machine_rg(machine)
     rows = []
 
-    if (machine.power_state or "") != "On":
+    if text(prop(machine, "power_state", "")) != "On":
         return [finding("WARN", name, rack, "platform", "run-read-commands",
                         "machine is powered off; on-machine checks skipped")]
 
@@ -245,17 +249,17 @@ def audit_on_machine(nc, machine, checks: list[str], timeout: int) -> list[dict]
 
     # The RP returns a URL to the collected output rather than inline text.
     output_url = getattr(result, "result_url", None) or getattr(result, "resultUrl", None)
-    text = getattr(result, "result_text", None) or ""
+    output = getattr(result, "result_text", None) or ""
 
-    if not text and output_url:
+    if not output and output_url:
         rows.append(finding("INFO", name, rack, "platform", "run-read-commands",
                             f"output written to the cluster storage account: {output_url}"))
         return rows
 
     if "disk" in checks:
-        rows.extend(parse_disk_output(text, name, rack))
+        rows.extend(parse_disk_output(output, name, rack))
     if "network" in checks:
-        rows.extend(parse_network_output(text, name, rack))
+        rows.extend(parse_network_output(output, name, rack))
 
     if not rows:
         rows.append(finding("INFO", name, rack, "on-machine", "-",
@@ -297,7 +301,7 @@ def main() -> int:
 
     rows: list[dict] = []
     for machine in machines:
-        LOG.info("auditing %s", machine.machine_name or machine.name)
+        LOG.info("auditing %s", machine_name(machine))
         rows.extend(audit_control_plane(machine))
         if not args.control_plane_only:
             rows.extend(audit_on_machine(nc, machine, checks, args.command_timeout))

@@ -148,7 +148,7 @@ class PureClient:
             detail = exc.read().decode()[:300]
             LOG.debug("%s %s -> %s %s", method, path, exc.code, detail)
             return exc.code, {"error": detail}, dict(exc.headers or {})
-        except (urllib.error.URLError, TimeoutError, ssl.SSLError, socket.timeout) as exc:
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
             LOG.debug("%s %s -> %s", method, path, exc)
             return 0, {"error": str(exc)}, {}
 
@@ -218,7 +218,7 @@ def tcp_probe(host: str, port: int, timeout: float = 5.0) -> tuple[bool, str]:
         with socket.create_connection((host, port), timeout=timeout):
             elapsed = (datetime.now() - start).total_seconds() * 1000
             return True, f"connected in {elapsed:.0f} ms"
-    except socket.timeout:
+    except TimeoutError:
         return False, f"timed out after {timeout}s"
     except OSError as exc:
         return False, str(exc)

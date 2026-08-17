@@ -20,7 +20,16 @@ from __future__ import annotations
 
 import sys
 
-from common import LOG, base_parser, connect, pct, render, setup_logging
+from common import (
+    EMPTY_CLASS,
+    base_parser,
+    connect,
+    pct,
+    placement_capacity,
+    render,
+    setup_logging,
+    usable,
+)
 
 COLUMNS = (
     "hypervisor",
@@ -36,27 +45,8 @@ COLUMNS = (
 )
 
 
-def placement_ratios(conn) -> dict[str, dict[str, float]]:
-    """Map resource provider name -> {VCPU: ratio, MEMORY_MB: ratio, DISK_GB: ratio}.
-
-    Falls back to an empty map (i.e. ratio 1.0) if the Placement API is not
-    reachable — older deployments or restricted credentials.
-    """
-    ratios: dict[str, dict[str, float]] = {}
-    try:
-        for provider in conn.placement.resource_providers():
-            inventories = conn.placement.resource_provider_inventories(provider)
-            ratios[provider.name] = {
-                inv.resource_class: float(getattr(inv, "allocation_ratio", 1.0) or 1.0)
-                for inv in inventories
-            }
-    except Exception as exc:  # noqa: BLE001 - placement is best-effort here
-        LOG.warning("placement inventory unavailable (%s); using raw totals", exc)
-    return ratios
-
-
 def hypervisor_rows(conn, aggregate_hosts: set[str] | None) -> list[dict]:
-    ratios = placement_ratios(conn)
+    capacity = placement_capacity(conn)
     rows = []
 
     for hv in conn.compute.hypervisors(details=True):
@@ -64,27 +54,40 @@ def hypervisor_rows(conn, aggregate_hosts: set[str] | None) -> list[dict]:
         if aggregate_hosts is not None and name not in aggregate_hosts:
             continue
 
-        ratio = ratios.get(name, {})
-        vcpu_total = (hv.vcpus or 0) * ratio.get("VCPU", 1.0)
-        mem_total = (hv.memory_size or 0) * ratio.get("MEMORY_MB", 1.0)
-        disk_total = (hv.local_disk_size or 0) * ratio.get("DISK_GB", 1.0)
+        provider = capacity.get(name)
+        if provider:
+            vcpu = provider.get("VCPU", EMPTY_CLASS)
+            mem = provider.get("MEMORY_MB", EMPTY_CLASS)
+            disk = provider.get("DISK_GB", EMPTY_CLASS)
+            vcpu_total, vcpu_used = usable(vcpu), vcpu["used"]
+            mem_total, mem_used = usable(mem), mem["used"]
+            disk_total, disk_used = usable(disk), disk["used"]
+            source = "placement"
+        else:
+            # Pre-2.88 clouds only. These fields are deprecated and will be
+            # None on anything current, which is why Placement is preferred.
+            vcpu_total, vcpu_used = float(hv.vcpus or 0), float(hv.vcpus_used or 0)
+            mem_total, mem_used = float(hv.memory_size or 0), float(hv.memory_used or 0)
+            disk_total, disk_used = float(hv.local_disk_size or 0), float(hv.local_disk_used or 0)
+            source = "nova"
 
         rows.append(
             {
                 "hypervisor": name,
                 "state": f"{hv.state}/{hv.status}",
                 "vms": hv.running_vms or 0,
-                "vcpu_used": hv.vcpus_used or 0,
+                "vcpu_used": int(vcpu_used),
                 "vcpu_total": int(vcpu_total),
-                "vcpu_pct": pct(hv.vcpus_used or 0, vcpu_total),
-                "mem_used_gb": round((hv.memory_used or 0) / 1024, 1),
+                "vcpu_pct": pct(vcpu_used, vcpu_total),
+                "mem_used_gb": round(mem_used / 1024, 1),
                 "mem_total_gb": round(mem_total / 1024, 1),
-                "mem_pct": pct(hv.memory_used or 0, mem_total),
-                "disk_pct": pct(hv.local_disk_used or 0, disk_total),
+                "mem_pct": pct(mem_used, mem_total),
+                "disk_pct": pct(disk_used, disk_total),
                 # Kept out of the default column set but useful in --format json.
-                "_vcpu_free": int(vcpu_total - (hv.vcpus_used or 0)),
-                "_mem_free_mb": int(mem_total - (hv.memory_used or 0)),
-                "_disk_free_gb": int(disk_total - (hv.local_disk_used or 0)),
+                "_source": source,
+                "_vcpu_free": int(vcpu_total - vcpu_used),
+                "_mem_free_mb": int(mem_total - mem_used),
+                "_disk_free_gb": int(disk_total - disk_used),
             }
         )
     return rows

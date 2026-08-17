@@ -126,13 +126,13 @@
       when: not ansible_check_mode
 
     - name: Run the post-upgrade health check
+      # Reported, not enforced: post-upgrade INFO findings are expected.
       ansible.builtin.command:
         argv:
           - python3
           - "{{ health_script }}"
           - "--resource-group={{ resource_group }}"
           - "--cluster={{ cluster }}"
-        # Reported, not enforced: post-upgrade INFO findings are expected.
       register: postflight
       changed_when: false
       failed_when: false

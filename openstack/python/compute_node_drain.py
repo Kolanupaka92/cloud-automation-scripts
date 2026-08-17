@@ -26,7 +26,15 @@ from __future__ import annotations
 
 import time
 
-from common import LOG, base_parser, confirm, connect, render, setup_logging
+from common import (
+    LOG,
+    base_parser,
+    confirm,
+    connect,
+    host_capacity,
+    render,
+    setup_logging,
+)
 
 # Instances in these states can be live-migrated; anything else needs a human.
 MIGRATABLE_VM_STATES = {"active", "paused"}
@@ -85,20 +93,21 @@ def capacity_available(conn, host: str, rows: list[dict]) -> bool:
         needed_vcpu += flavor.vcpus or 0
         needed_mem += flavor.ram or 0
 
-    free_vcpu = 0
-    free_mem = 0
-    for hv in conn.compute.hypervisors(details=True):
-        if hv.name == host or hv.state != "up" or hv.status != "enabled":
-            continue
-        free_vcpu += (hv.vcpus or 0) - (hv.vcpus_used or 0)
-        free_mem += (hv.memory_size or 0) - (hv.memory_used or 0)
+    # Capacity comes from Placement where available — the hypervisor API stopped
+    # reporting these numbers at Nova 2.88, and a zero here would wave through a
+    # drain the region cannot actually absorb.
+    hypervisors = [
+        hv for hv in conn.compute.hypervisors(details=True)
+        if hv.name != host and hv.state == "up" and hv.status == "enabled"
+    ]
+    capacity = host_capacity(conn, hypervisors)
+    free_vcpu = sum(entry["vcpu_free"] for entry in capacity.values())
+    free_mem = sum(entry["mem_free"] for entry in capacity.values())
+    sources = {entry["source"] for entry in capacity.values()} or {"none"}
 
     LOG.info(
-        "need %d vCPU / %d MB; region has %d vCPU / %d MB free elsewhere",
-        needed_vcpu,
-        needed_mem,
-        free_vcpu,
-        free_mem,
+        "need %d vCPU / %d MB; %d other host(s) have %d vCPU / %d MB free (source: %s)",
+        needed_vcpu, needed_mem, len(capacity), free_vcpu, free_mem, ",".join(sorted(sources)),
     )
     return free_vcpu >= needed_vcpu and free_mem >= needed_mem
 

@@ -27,7 +27,7 @@ import sys
 import time
 from collections import Counter
 
-from common import LOG, base_parser, connect, setup_logging
+from common import LOG, base_parser, connect, host_capacity, setup_logging
 
 try:
     from prometheus_client import REGISTRY, Gauge, generate_latest, start_http_server
@@ -77,12 +77,21 @@ def collect_agents(conn) -> None:
 
 
 def collect_hypervisors(conn) -> None:
-    for hv in conn.compute.hypervisors(details=True):
+    # Capacity comes from Placement: Nova stopped returning these fields on the
+    # hypervisor API at microversion 2.88, and an exporter publishing zeros is
+    # worse than one publishing nothing — every capacity alert would go quiet.
+    hypervisors = list(conn.compute.hypervisors(details=True))
+    capacity = host_capacity(conn, hypervisors)
+
+    for hv in hypervisors:
         host = hv.name
-        VCPUS_TOTAL.labels(host).set(hv.vcpus or 0)
-        VCPUS_USED.labels(host).set(hv.vcpus_used or 0)
-        MEM_TOTAL.labels(host).set(hv.memory_size or 0)
-        MEM_USED.labels(host).set(hv.memory_used or 0)
+        entry = capacity.get(host)
+        if entry:
+            VCPUS_TOTAL.labels(host).set(entry["vcpu_total"])
+            VCPUS_USED.labels(host).set(entry["vcpu_used"])
+            MEM_TOTAL.labels(host).set(entry["mem_total"])
+            MEM_USED.labels(host).set(entry["mem_used"])
+        # Disk and VM count have no Placement equivalent worth publishing here.
         DISK_TOTAL.labels(host).set(hv.local_disk_size or 0)
         DISK_USED.labels(host).set(hv.local_disk_used or 0)
         RUNNING_VMS.labels(host).set(hv.running_vms or 0)

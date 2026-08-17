@@ -10,6 +10,11 @@ skip_list:
   # Playbooks here are run ad hoc against a named region, not from a fixed
   # inventory, so localhost plays and command modules are intentional.
   - name[template]
+  # Role-internal temporaries are deliberately prefixed with a single
+  # underscore rather than the full role name. The convention is consistent
+  # across every role here and keeps long Jinja expressions readable; the
+  # variables are never consumed outside the role that sets them.
+  - var-naming[no-role-prefix]
 
 warn_list:
   - experimental

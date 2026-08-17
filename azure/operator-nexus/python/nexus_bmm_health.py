@@ -29,11 +29,14 @@ from nexus_common import (
     client,
     health_summary,
     list_machines,
+    machine_name,
     machine_rg,
+    prop,
     rack_name,
     rack_slot,
     render,
     setup_logging,
+    text,
     workload_count,
 )
 
@@ -53,27 +56,27 @@ COLUMNS = (
 
 def machine_row(machine) -> dict:
     problems = health_summary(machine)
-    hardware = getattr(machine, "hardware_validation_status", None)
+    hardware = prop(machine, "hardware_validation_status")
     return {
-        "machine": machine.machine_name or machine.name,
+        "machine": machine_name(machine),
         "rack": rack_name(machine),
         "slot": rack_slot(machine),
-        "ready": str(machine.ready_state),
-        "power": machine.power_state or "-",
-        "cordon": machine.cordon_status or "Uncordoned",
-        "detailed_status": machine.detailed_status or "-",
+        "ready": text(prop(machine, "ready_state")),
+        "power": text(prop(machine, "power_state"), "-"),
+        "cordon": text(prop(machine, "cordon_status"), "Uncordoned"),
+        "detailed_status": text(prop(machine, "detailed_status"), "-"),
         "tenant_vms": workload_count(machine),
-        "k8s_node": machine.kubernetes_node_name or "-",
+        "k8s_node": text(prop(machine, "kubernetes_node_name"), "-"),
         "problems": "; ".join(problems) or "none",
         # Extra context that only makes sense in --format json.
         "_resource_group": machine_rg(machine),
-        "_serial": machine.serial_number,
-        "_sku": machine.machine_sku_id,
-        "_oam_ip": getattr(machine, "oam_ipv4_address", None),
-        "_bmc_ip": getattr(machine, "bmc_connection_string", None),
-        "_machine_cluster_version": getattr(machine, "machine_cluster_version", None),
-        "_kubernetes_version": getattr(machine, "kubernetes_version", None),
-        "_detailed_status_message": machine.detailed_status_message,
+        "_serial": prop(machine, "serial_number"),
+        "_sku": prop(machine, "machine_sku_id"),
+        "_oam_ip": prop(machine, "oam_ipv4_address"),
+        "_bmc_ip": prop(machine, "bmc_connection_string"),
+        "_machine_cluster_version": prop(machine, "machine_cluster_version"),
+        "_kubernetes_version": prop(machine, "kubernetes_version"),
+        "_detailed_status_message": prop(machine, "detailed_status_message"),
         "_hardware_validation": getattr(hardware, "result", None) if hardware else None,
         "_healthy": not problems,
     }

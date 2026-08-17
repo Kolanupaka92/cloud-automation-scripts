@@ -1,7 +1,7 @@
 ---
 name: lint
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -32,6 +32,28 @@ jobs:
           python -m compileall -q \
             openstack/python azure/python azure/operator-nexus/python \
             storage/python kubernetes/python security/python network/python
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the real SDKs
+        # The tests build genuine openstacksdk and azure-mgmt model objects, so
+        # they fail when an SDK renames a field or changes model shape — the
+        # breakage that otherwise shows up as an empty report against a live
+        # cloud rather than as a test failure here.
+        run: |
+          pip install pytest
+          pip install openstacksdk azure-identity azure-mgmt-networkcloud
+
+      - name: Run tests
+        run: pytest tests/ -q
 
   ansible:
     name: Ansible
@@ -87,7 +109,10 @@ jobs:
         run: |
           set +e
           # This job's own pattern definition would otherwise match itself.
-          pattern='(BEGIN [A-Z ]*PRIVATE KEY|OS_PASSWORD=.+|AZURE_CLIENT_SECRET=.+|client_secret"?[[:space:]]*[:=][[:space:]]*[^$[:space:]]+)'
+          key='BEGIN [A-Z ]*PRIVATE KEY'
+          envs='(OS_PASSWORD|AZURE_CLIENT_SECRET|PURE_API_TOKEN|S1_API_TOKEN)=.+'
+          literal='client_secret"?[[:space:]]*[:=][[:space:]]*[^$[:space:]]+'
+          pattern="($key|$envs|$literal)"
           matches=$(grep -rInE "$pattern" \
             --exclude-dir=.git \
             --exclude-dir=.github \

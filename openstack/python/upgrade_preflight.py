@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from common import LOG, base_parser, connect, render, setup_logging
+from common import LOG, base_parser, connect, host_capacity, render, setup_logging
 
 CHECKS = (
     "services",
@@ -169,18 +169,22 @@ def check_capacity(conn, evacuate_hosts: int) -> list[dict]:
     if not hypervisors:
         return [fail("capacity", "nova", "no hypervisors reporting up")]
 
+    # Capacity via Placement; the hypervisor API stopped reporting it at 2.88.
+    capacity = host_capacity(conn, hypervisors)
+
     # Worst case: the N most heavily loaded hosts go down at once.
-    by_load = sorted(hypervisors, key=lambda hv: (hv.memory_used or 0), reverse=True)
+    by_load = sorted(hypervisors, key=lambda hv: capacity[hv.name]["mem_used"], reverse=True)
     victims = by_load[:evacuate_hosts]
-    need_vcpu = sum(hv.vcpus_used or 0 for hv in victims)
-    need_mem = sum(hv.memory_used or 0 for hv in victims)
-
     survivors = by_load[evacuate_hosts:]
-    free_vcpu = sum((hv.vcpus or 0) - (hv.vcpus_used or 0) for hv in survivors)
-    free_mem = sum((hv.memory_size or 0) - (hv.memory_used or 0) for hv in survivors)
 
-    detail = (f"need {need_vcpu} vCPU / {need_mem} MB to drain {evacuate_hosts} host(s); "
-              f"{free_vcpu} vCPU / {free_mem} MB free elsewhere")
+    need_vcpu = sum(capacity[hv.name]["vcpu_used"] for hv in victims)
+    need_mem = sum(capacity[hv.name]["mem_used"] for hv in victims)
+    free_vcpu = sum(capacity[hv.name]["vcpu_free"] for hv in survivors)
+    free_mem = sum(capacity[hv.name]["mem_free"] for hv in survivors)
+
+    detail = (f"need {need_vcpu:.0f} vCPU / {need_mem:.0f} MB to drain "
+              f"{evacuate_hosts} host(s); {free_vcpu:.0f} vCPU / {free_mem:.0f} MB "
+              f"free elsewhere")
     if free_vcpu >= need_vcpu and free_mem >= need_mem:
         return [ok("capacity", "nova", detail)]
     return [fail("capacity", "nova", detail)]

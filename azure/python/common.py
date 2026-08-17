@@ -27,7 +27,7 @@ from typing import Any
 try:
     from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
     from azure.identity import DefaultAzureCredential
-    from azure.mgmt.resource.subscriptions import SubscriptionClient
+    from azure.mgmt.subscription import SubscriptionClient
 except ImportError:  # pragma: no cover - dependency guard
     sys.exit(
         "Azure SDK packages are missing. Run: pip install -r requirements.txt"
