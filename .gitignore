@@ -24,6 +24,8 @@ reports/
 state/
 *.retry
 ansible_fact_cache/
+# Collections installed into the repo by ansible-galaxy
+.ansible/
 
 # Python
 .venv/
