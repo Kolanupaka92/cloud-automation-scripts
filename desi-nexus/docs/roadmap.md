@@ -42,7 +42,7 @@ repository today versus what is specified but unbuilt.
 | Cancellation tiers and refund splitting | **built** |
 | Dispute open and admin resolution | **built** |
 | Stripe Connect onboarding | **built** against the gateway interface |
-| Live Stripe HTTP client | interface + fake only |
+| Live Stripe HTTP client | **built** on the official SDK, tested against a local Stripe stand-in |
 | PostgreSQL repository implementations | **built**, with the booking flow tested end to end against a real database |
 | Application role and privilege posture | **built** (`003_app_role.sql`) |
 | Penetration test | not started |
@@ -50,13 +50,14 @@ repository today versus what is specified but unbuilt.
 
 ## What to build next, in order
 
-1. **The live Stripe client.** Same shape as `FakeStripeGateway`, which the
-   whole payment path already runs against. Then re-run the existing end-to-end
-   suite pointed at Stripe test mode.
-2. **Redis-backed rate limiting.** Per-pod buckets are a real hole once there is
+1. **Redis-backed rate limiting.** Per-pod buckets are a real hole once there is
    more than one replica — see `docs/security.md`.
-3. **The outbox relay.** The table and the publish calls exist; the poller does
+2. **The outbox relay.** The table and the publish calls exist; the poller does
    not. Until it does, notifications depend on the in-process bus.
+3. **A run against Stripe test mode.** The gateway is verified against a local
+   stand-in, which checks the request shape and the error handling but not
+   Stripe's own behaviour. Point the end-to-end suite at test-mode keys before
+   the pilot.
 4. **Notification transports**, then the WebSocket layer.
 5. **Next.js host dashboard**, then the mobile clients.
 
@@ -65,6 +66,11 @@ repository today versus what is specified but unbuilt.
 **PostgreSQL repositories.** Implemented behind the existing interfaces, so the
 routes and the domain did not change. Wiring them up found four defects that the
 in-memory store could not have surfaced — see the README.
+
+**The live Stripe gateway.** Built on the official SDK, behind the same
+`StripeGateway` interface the fake implements. Live payments engage when
+`STRIPE_API_KEY` is set; production refuses to start without it, so there is no
+configuration in which the service quietly accepts bookings that move no money.
 
 ## Metrics to instrument from day one
 

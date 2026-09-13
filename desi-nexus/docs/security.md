@@ -31,6 +31,17 @@ rather than reconciled by hand. `UPDATE` and `DELETE` on `ledger_entries` are
 rejected by a database trigger, not merely by convention — a correction is a
 compensating entry.
 
+**The API version is pinned.** An unpinned integration silently adopts whatever
+version Stripe makes current, which changes response shapes under a running
+service. It moves on purpose, with the changelog open.
+
+**Stripe's error copy never reaches a client.** It is written for the
+integrator and can name internal decline codes; callers get a stable code and a
+retryable flag, and the detail goes to the log with Stripe's request id. That
+classification is load-bearing in both directions: retrying a decline annoys the
+cardholder and can trip fraud rules, while giving up on a transient rate limit
+strands funds mid-booking.
+
 **Every mutating Stripe call is idempotent**, keyed on the escrow and the leg.
 A retried request cannot double-charge or double-pay. The idempotency check runs
 *before* the state check, so a redelivered webhook is a silent no-op rather than

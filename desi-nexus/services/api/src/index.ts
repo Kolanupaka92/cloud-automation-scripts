@@ -11,7 +11,13 @@ import { buildDeps, buildRouter, createRequestListener } from "./app.js";
 const port = Number(process.env.PORT ?? 8080);
 
 if (process.env.NODE_ENV === "production") {
-  for (const required of ["DESI_NEXUS_TOKEN_SECRET", "DESI_NEXUS_WEBHOOK_SECRET"]) {
+  for (const required of [
+    "DESI_NEXUS_TOKEN_SECRET",
+    "DESI_NEXUS_WEBHOOK_SECRET",
+    // Without this the service would silently fall back to the fake gateway
+    // and accept bookings that move no money at all.
+    "STRIPE_API_KEY",
+  ]) {
     if (!process.env[required]) {
       console.error(`refusing to start: ${required} is not set`);
       process.exit(1);

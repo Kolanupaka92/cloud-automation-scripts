@@ -17,17 +17,18 @@ hyper-local marketplace reaches liquidity in a single metro.
 | `services/api/src/infra/` | Tokens, password hashing, rate limiting, the Stripe boundary, repositories |
 | `services/api/src/http/` | Router, middleware and route modules |
 | `services/api/src/infra/postgres/` | PostgreSQL repository implementations |
-| `services/api/test/` | 140 tests, including the full booking flow run over both stores |
+| `services/api/src/infra/stripe/` | Payment contract, the live gateway, and the fake |
+| `services/api/test/` | 155 tests, including the full booking flow run over both stores |
 | `db/migrations/` | PostgreSQL schema, seeded reference data, application role |
 | `docs/` | Architecture, security posture, API specification, roadmap |
 
-The domain core, the security layer, the HTTP surface and PostgreSQL
-persistence are real and runnable. Persistence sits behind repository
-interfaces with both an in-memory and a PostgreSQL implementation, and the same
-end-to-end booking test runs against each — so the swap is proven transparent
-rather than assumed. The Stripe gateway is behind an interface with a fake; the
-live HTTP client is the next thing to build. See `docs/roadmap.md` for an honest
-built-versus-specified breakdown.
+The domain core, the security layer, the HTTP surface, PostgreSQL persistence
+and the Stripe integration are real and runnable. Persistence sits behind
+repository interfaces with both an in-memory and a PostgreSQL implementation,
+and the same end-to-end booking test runs against each — so the swap is proven
+transparent rather than assumed. Payments sit behind the same kind of interface,
+with a live gateway on the official Stripe SDK and a fake for tests and local
+runs. See `docs/roadmap.md` for an honest built-versus-specified breakdown.
 
 ## Running it
 
@@ -45,12 +46,16 @@ To also run the database-backed tests, point them at a PostgreSQL with PostGIS:
 
 ```bash
 export DESI_NEXUS_TEST_DATABASE_URL=postgresql://user@localhost:5432/desi_nexus_test
-npm test          # 140 tests instead of 113
+npm test          # 155 tests instead of 128
 ```
 
 Without that variable the 27 database tests skip and the rest still run. CI sets
 it and fails the build if they skip, because a skipped suite still reports
 success and would quietly stop covering the repository layer.
+
+Payments use the fake gateway unless `STRIPE_API_KEY` is set. Production refuses
+to start without one, so there is no configuration in which the service quietly
+accepts bookings that move no money.
 
 ```bash
 curl -s localhost:8080/healthz
@@ -120,7 +125,7 @@ travel off-platform, which is the leakage the escrow exists to prevent.
 cd services/api && npm test
 ```
 
-140 tests. Beyond the unit coverage, the suite asserts the things that would
+155 tests. Beyond the unit coverage, the suite asserts the things that would
 actually hurt: that a booking cannot be confirmed before its deposit clears,
 that a replayed Stripe webhook cannot double-fund, that a released escrow cannot
 be refunded, that dispute resolutions account for every held cent, that
@@ -135,6 +140,13 @@ The database tests run against a real PostgreSQL — there is no mock, because t
 entire value of that layer is whether the SQL, the constraints and the type
 mapping actually work, and a fake answers none of that. The complete booking
 flow is run twice, once over each store, so the two cannot drift apart.
+
+The Stripe gateway is tested against a local server standing in for Stripe — no
+key, no network. What that checks is the part that is actually ours: that every
+mutating call carries an idempotency key, that the API version is pinned, that
+no PaymentIntent carries `transfer_data` (which would pay the vendor at capture
+and leave no escrow to release from), and that failures are classified
+retryable or final the way the booking flow depends on.
 
 ### What wiring up PostgreSQL found
 
@@ -155,3 +167,15 @@ Four defects the in-memory store could not have surfaced:
    `REVOKE UPDATE ON ledger_entries` was unqualified and resolved through
    `search_path`. Where those differed, the ledger stayed updatable — exactly
    the guarantee the migration exists to provide.
+
+### What wiring up Stripe found
+
+Error classification cannot dispatch on the SDK's error classes. In the current
+SDK every error built from an API response arrives as a `StripeAPIError`
+whatever actually failed, so `instanceof StripeCardError` is false for a real
+decline and the obvious implementation sends everything to the default branch.
+The discriminator is `rawType`, the wire vocabulary; errors raised locally
+rather than by the API carry no `rawType` and are identified by `type` instead,
+so both are read. Had this gone unnoticed, a transient rate limit would have
+been classified non-retryable and a booking would have been stranded rather
+than retried.

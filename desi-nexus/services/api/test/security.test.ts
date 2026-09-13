@@ -10,7 +10,7 @@ import {
 } from "../src/infra/tokens.js";
 import { assertPasswordPolicy, hashPassword, verifyPassword, PasswordPolicyError } from "../src/infra/passwords.js";
 import { RateLimiter } from "../src/infra/rateLimit.js";
-import { verifyWebhookSignature, WEBHOOK_TOLERANCE_SECONDS } from "../src/infra/stripe.js";
+import { verifyWebhookSignature, WEBHOOK_TOLERANCE_SECONDS } from "../src/infra/stripe/index.js";
 import { canReceivePayouts, meetsVerification, type BaseUser } from "../src/domain/users.js";
 
 const SECRET = "a-test-signing-secret-that-is-long-enough";

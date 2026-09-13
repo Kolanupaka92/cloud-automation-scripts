@@ -27,7 +27,7 @@ import {
   resolveDispute,
   heldCents,
 } from "../../domain/escrow.js";
-import { verifyWebhookSignature } from "../../infra/stripe.js";
+import { verifyWebhookSignature } from "../../infra/stripe/index.js";
 import { TOPICS } from "../../events/bus.js";
 import type { AppDeps } from "../../app.js";
 

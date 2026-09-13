@@ -13,7 +13,9 @@ import { registerPaymentRoutes } from "./http/routes/payments.js";
 import { registerDiscoveryRoutes } from "./http/routes/discovery.js";
 import { RateLimiter } from "./infra/rateLimit.js";
 import { createInMemoryStore, type Store } from "./infra/store.js";
-import { FakeStripeGateway, type StripeGateway } from "./infra/stripe.js";
+import type { StripeGateway } from "./infra/stripe/index.js";
+import { FakeStripeGateway } from "./infra/stripe/fake.js";
+import { liveStripeFromEnv } from "./infra/stripe/live.js";
 import { InMemoryEventBus, type EventBus } from "./events/bus.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -41,10 +43,27 @@ export function buildDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     config,
     store: overrides.store ?? createInMemoryStore(),
-    stripe: overrides.stripe ?? new FakeStripeGateway(),
+    stripe: overrides.stripe ?? defaultStripeGateway(),
     bus: overrides.bus ?? new InMemoryEventBus(),
     limiter: overrides.limiter ?? new RateLimiter(),
   };
+}
+
+/**
+ * Live payments when a key is configured, the fake otherwise.
+ *
+ * The choice is made by the presence of a key rather than by a flag, so there
+ * is no way to be in production with `USE_REAL_STRIPE=false` still set. The
+ * production guard in index.ts refuses to start without one.
+ */
+function defaultStripeGateway(): StripeGateway {
+  if (!process.env.STRIPE_API_KEY) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("STRIPE_API_KEY is required in production");
+    }
+    return new FakeStripeGateway();
+  }
+  return liveStripeFromEnv();
 }
 
 export function buildRouter(deps: AppDeps): Router {
