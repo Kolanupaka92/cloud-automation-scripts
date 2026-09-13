@@ -17,3 +17,5 @@ rules:
 ignore: |
   .venv/
   reports/
+  node_modules/
+  dist/

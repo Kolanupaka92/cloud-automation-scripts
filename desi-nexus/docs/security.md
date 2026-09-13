@@ -79,7 +79,17 @@ agreed to.
   column is additionally envelope-encrypted, so a database dump alone does not
   yield second factors.
 - Row-level security on `gigs`, `escrows` and `reviews`. Even with a SQL
-  injection foothold, a host cannot read another host's bookings.
+  injection foothold, a host cannot read another host's bookings. The policies
+  read `app.current_user_id`, which the repository layer sets per transaction
+  with `set_config(..., true)` so it cannot leak to the next borrower of a
+  pooled connection.
+- **The service connects as `desi_nexus_app`, never as the schema owner**
+  (`db/migrations/003_app_role.sql`). This is what makes the policies real: RLS
+  is bypassed by the table owner, so an application connecting as the owner is
+  protected by none of it. That role also cannot `DELETE` a user, gig, booking
+  or ledger row, and cannot `UPDATE` the append-only tables at all — the
+  privilege is withheld, so the attempt is refused before it reaches a trigger.
+  There are tests asserting each of those grants.
 
 ## Anti-scraping
 

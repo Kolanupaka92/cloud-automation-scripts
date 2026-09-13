@@ -34,7 +34,7 @@ export function registerGigRoutes(router: Router, deps: AppDeps): void {
       const now = new Date().toISOString();
 
       const gig: Gig = {
-        id: `gig_${randomUUID().slice(0, 12)}`,
+        id: randomUUID(),
         hostId,
         state: "Draft",
         brief,
@@ -128,7 +128,7 @@ export function registerGigRoutes(router: Router, deps: AppDeps): void {
 
       const body = ctx.body as Record<string, unknown>;
       const application = await store.applications.create({
-        id: `app_${randomUUID().slice(0, 12)}`,
+        id: randomUUID(),
         gigId: gig.id,
         vendorId,
         quotedRateCents,

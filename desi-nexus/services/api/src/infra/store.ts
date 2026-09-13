@@ -97,12 +97,19 @@ function clone<T>(value: T): T {
 class MemoryUsers implements UserRepository {
   private readonly byIdMap = new Map<string, BaseUser>();
   private readonly byEmailMap = new Map<string, string>();
+  private readonly byPhoneMap = new Map<string, string>();
 
   async create(user: BaseUser): Promise<BaseUser> {
     const key = user.email.toLowerCase();
     if (this.byEmailMap.has(key)) throw new Error("email already registered");
+    // Phone is unique in the schema, and must be here too: a number shared
+    // between accounts means an OTP that authenticates the wrong person.
+    if (user.phone && this.byPhoneMap.has(user.phone)) {
+      throw new Error("phone already registered");
+    }
     this.byIdMap.set(user.id, clone(user));
     this.byEmailMap.set(key, user.id);
+    if (user.phone) this.byPhoneMap.set(user.phone, user.id);
     return clone(user);
   }
 
@@ -119,8 +126,13 @@ class MemoryUsers implements UserRepository {
   async update(id: string, patch: Partial<BaseUser>): Promise<BaseUser> {
     const user = this.byIdMap.get(id);
     if (!user) throw new Error(`no such user: ${id}`);
+    if (patch.phone && patch.phone !== user.phone && this.byPhoneMap.has(patch.phone)) {
+      throw new Error("phone already registered");
+    }
     const updated = { ...user, ...patch, id: user.id } as BaseUser;
     this.byIdMap.set(id, updated);
+    if (user.phone && updated.phone !== user.phone) this.byPhoneMap.delete(user.phone);
+    if (updated.phone) this.byPhoneMap.set(updated.phone, id);
     return clone(updated);
   }
 }

@@ -106,7 +106,7 @@ export function registerPaymentRoutes(router: Router, deps: AppDeps): void {
       const quote = quoteBooking(application.quotedRateCents, travel.totalCents, DEFAULT_FEES);
 
       const escrow = createEscrow({
-        id: `esc_${randomUUID().slice(0, 12)}`,
+        id: randomUUID(),
         gigId: gig.id,
         hostId,
         vendorId: application.vendorId,

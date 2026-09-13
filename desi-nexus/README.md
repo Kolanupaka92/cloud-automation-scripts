@@ -16,15 +16,18 @@ hyper-local marketplace reaches liquidity in a single metro.
 | `services/api/src/domain/` | The domain core: taxonomy, money, geography, gig state machine, matching, escrow |
 | `services/api/src/infra/` | Tokens, password hashing, rate limiting, the Stripe boundary, repositories |
 | `services/api/src/http/` | Router, middleware and route modules |
-| `services/api/test/` | 113 tests, including a full booking flow over the real routes |
-| `db/migrations/` | PostgreSQL schema and seeded reference data |
+| `services/api/src/infra/postgres/` | PostgreSQL repository implementations |
+| `services/api/test/` | 140 tests, including the full booking flow run over both stores |
+| `db/migrations/` | PostgreSQL schema, seeded reference data, application role |
 | `docs/` | Architecture, security posture, API specification, roadmap |
 
-The domain core, the security layer and the HTTP surface are real and runnable.
-Persistence is behind repository interfaces with in-memory implementations; the
-Stripe gateway is behind an interface with a fake. Both are designed to be
-swapped without the domain or the routes changing. See `docs/roadmap.md` for an
-honest built-versus-specified breakdown.
+The domain core, the security layer, the HTTP surface and PostgreSQL
+persistence are real and runnable. Persistence sits behind repository
+interfaces with both an in-memory and a PostgreSQL implementation, and the same
+end-to-end booking test runs against each — so the swap is proven transparent
+rather than assumed. The Stripe gateway is behind an interface with a fake; the
+live HTTP client is the next thing to build. See `docs/roadmap.md` for an honest
+built-versus-specified breakdown.
 
 ## Running it
 
@@ -37,6 +40,17 @@ npm run build && npm start
 
 The service starts on `:8080` with in-memory persistence and the fake payment
 gateway, so the whole booking flow works locally with no external dependencies.
+
+To also run the database-backed tests, point them at a PostgreSQL with PostGIS:
+
+```bash
+export DESI_NEXUS_TEST_DATABASE_URL=postgresql://user@localhost:5432/desi_nexus_test
+npm test          # 140 tests instead of 113
+```
+
+Without that variable the 27 database tests skip and the rest still run. CI sets
+it and fails the build if they skip, because a skipped suite still reports
+success and would quietly stop covering the repository layer.
 
 ```bash
 curl -s localhost:8080/healthz
@@ -56,10 +70,17 @@ psql -d desi_nexus -f db/migrations/001_init.sql
 psql -d desi_nexus -f db/migrations/002_seed_reference_data.sql
 ```
 
-Requires PostgreSQL 15+ with PostGIS. The schema was validated against
-PostgreSQL 16; its check constraints, unique indexes, append-only triggers and
-row-level security policies were each confirmed to reject the bad writes they
-are there to prevent.
+```bash
+psql -d desi_nexus -f db/migrations/003_app_role.sql   # as the schema owner
+```
+
+Requires PostgreSQL 15+ with PostGIS. The schema is exercised by the test suite
+on every run: its check constraints, unique indexes, append-only triggers and
+privilege grants are each confirmed to reject the writes they exist to prevent.
+
+`003_app_role.sql` creates the role the service connects as. Use it — row-level
+security is bypassed by the table owner, so an application connecting as the
+owner is protected by none of the policies in `001_init.sql`.
 
 ## The decisions worth knowing about
 
@@ -99,7 +120,7 @@ travel off-platform, which is the leakage the escrow exists to prevent.
 cd services/api && npm test
 ```
 
-113 tests. Beyond the unit coverage, the suite asserts the things that would
+140 tests. Beyond the unit coverage, the suite asserts the things that would
 actually hurt: that a booking cannot be confirmed before its deposit clears,
 that a replayed Stripe webhook cannot double-fund, that a released escrow cannot
 be refunded, that dispute resolutions account for every held cent, that
@@ -109,3 +130,28 @@ nothing about whether the address is registered.
 
 A drift test compares the TypeScript taxonomy against the seeded SQL reference
 data, so a new event type cannot be added to one and forgotten in the other.
+
+The database tests run against a real PostgreSQL — there is no mock, because the
+entire value of that layer is whether the SQL, the constraints and the type
+mapping actually work, and a fake answers none of that. The complete booking
+flow is run twice, once over each store, so the two cannot drift apart.
+
+### What wiring up PostgreSQL found
+
+Four defects the in-memory store could not have surfaced:
+
+1. **IDs were the wrong type.** The routes generated `usr_a1b2c3d4e5f6`; every
+   id column in the schema is `UUID`. Every insert would have failed the moment
+   a real database was attached. They are full UUIDs now — which also fixed the
+   second bug.
+2. **IDs were 48 bits, not 128.** `randomUUID().slice(0, 12)` throws away most
+   of the entropy, and a primary-key collision there is a hard failure for
+   someone signing up.
+3. **Phone numbers were unique in the schema but not in the store.** Two
+   accounts sharing a number means an OTP that authenticates the wrong person.
+   The in-memory store now enforces it too, so the two agree.
+4. **`003_app_role.sql` granted and revoked against different schemas.**
+   `GRANT ... ON ALL TABLES IN SCHEMA public` names a schema; the follow-up
+   `REVOKE UPDATE ON ledger_entries` was unqualified and resolved through
+   `search_path`. Where those differed, the ledger stayed updatable — exactly
+   the guarantee the migration exists to provide.

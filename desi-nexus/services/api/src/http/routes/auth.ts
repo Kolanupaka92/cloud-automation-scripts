@@ -43,7 +43,7 @@ export function registerAuthRoutes(router: Router, deps: AppDeps): void {
       const body = ctx.body as Record<string, unknown>;
 
       const user: BaseUser = {
-        id: `usr_${randomUUID().slice(0, 12)}`,
+        id: randomUUID(),
         email: email.toLowerCase(),
         displayName: displayName.trim(),
         roles,

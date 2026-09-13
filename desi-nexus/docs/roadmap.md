@@ -43,22 +43,28 @@ repository today versus what is specified but unbuilt.
 | Dispute open and admin resolution | **built** |
 | Stripe Connect onboarding | **built** against the gateway interface |
 | Live Stripe HTTP client | interface + fake only |
-| PostgreSQL repository implementations | interfaces + in-memory only |
+| PostgreSQL repository implementations | **built**, with the booking flow tested end to end against a real database |
+| Application role and privilege posture | **built** (`003_app_role.sql`) |
 | Penetration test | not started |
 | App Store / Play Store submission | not started |
 
 ## What to build next, in order
 
-1. **PostgreSQL repositories.** The schema and the interfaces both exist; this
-   is mechanical, and nothing else can be load-tested until it lands.
-2. **The live Stripe client.** Same shape as `FakeStripeGateway`. Then run the
-   existing e2e suite against Stripe test mode.
-3. **Redis-backed rate limiting.** Per-pod buckets are a real hole once there is
+1. **The live Stripe client.** Same shape as `FakeStripeGateway`, which the
+   whole payment path already runs against. Then re-run the existing end-to-end
+   suite pointed at Stripe test mode.
+2. **Redis-backed rate limiting.** Per-pod buckets are a real hole once there is
    more than one replica — see `docs/security.md`.
-4. **The outbox relay.** The table and the publish calls exist; the poller does
+3. **The outbox relay.** The table and the publish calls exist; the poller does
    not. Until it does, notifications depend on the in-process bus.
-5. **Notification transports**, then the WebSocket layer.
-6. **Next.js host dashboard**, then the mobile clients.
+4. **Notification transports**, then the WebSocket layer.
+5. **Next.js host dashboard**, then the mobile clients.
+
+### Done since the first cut
+
+**PostgreSQL repositories.** Implemented behind the existing interfaces, so the
+routes and the domain did not change. Wiring them up found four defects that the
+in-memory store could not have surfaced — see the README.
 
 ## Metrics to instrument from day one
 

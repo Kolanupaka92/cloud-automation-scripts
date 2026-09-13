@@ -1,10 +1,11 @@
 # DESI-NEXUS API
 
-The marketplace backend. TypeScript on Node 20+, no runtime dependencies.
+The marketplace backend. TypeScript on Node 20+, with `pg` as its only runtime
+dependency.
 
 ```bash
 npm install
-npm test     # typecheck + 113 tests
+npm test     # typecheck + 140 tests (113 without a database)
 npm start    # :8080
 ```
 
@@ -26,6 +27,7 @@ src/infra/      adapters — each one swappable without touching the domain
   rateLimit.ts  token buckets (move to Redis before the pilot)
   stripe.ts     the payment boundary + webhook signature verification
   store.ts      repository interfaces + in-memory implementations
+  postgres/     PostgreSQL implementations of those same interfaces
 
 src/http/       router, middleware, routes
 src/events/     domain event bus (outbox-shaped)
@@ -44,6 +46,17 @@ same reasoning applies to the hand-rolled HS256 in `tokens.ts`: it is auditable
 in one screen, has no dependency to patch, and pins the algorithm so the token
 confusion attacks are unreachable.
 
+`pg` is the exception, and deliberately so: a PostgreSQL wire-protocol client is
+not something to hand-roll, and it is the boring, standard choice.
+
+## Testing against a database
+
+`test/db.ts` gives each database-backed test file its own PostgreSQL schema.
+Node's test runner runs files in parallel, and a shared schema means one file's
+`TRUNCATE` wipes another's fixtures mid-test — a failure that only appears in
+the full run and passes when the file is re-run alone, which is the worst kind
+to debug.
+
 ## Environment
 
 | Variable | Required | Purpose |
@@ -52,6 +65,7 @@ confusion attacks are unreachable.
 | `DESI_NEXUS_TOKEN_SECRET` | in production | Token signing key |
 | `DESI_NEXUS_WEBHOOK_SECRET` | in production | Stripe webhook signing secret |
 | `NODE_ENV` | no | `production` disables dev OTP echo and enforces the above |
+| `DESI_NEXUS_TEST_DATABASE_URL` | tests only | Points the database-backed tests at a PostgreSQL with PostGIS; they skip when unset |
 
 TLS terminates at the load balancer. This process listens on plain HTTP inside
 the mesh and must never be exposed directly.

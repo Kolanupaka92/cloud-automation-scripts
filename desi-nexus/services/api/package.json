@@ -4,7 +4,9 @@
   "private": true,
   "description": "DESI-NEXUS marketplace API: gig matching, cultural taxonomy and Stripe Connect escrow.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
@@ -13,6 +15,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }

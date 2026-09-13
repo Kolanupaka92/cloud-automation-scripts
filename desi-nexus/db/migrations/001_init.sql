@@ -14,10 +14,15 @@
 
 BEGIN;
 
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";   -- gen_random_uuid()
-CREATE EXTENSION IF NOT EXISTS "postgis";    -- geography(Point) for geofencing
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";    -- fuzzy name search
-CREATE EXTENSION IF NOT EXISTS "citext";     -- case-insensitive email
+-- Extensions are pinned to `public` rather than left to the search path. An
+-- unqualified CREATE EXTENSION installs into the first schema on the search
+-- path, so a deployment that puts the application's tables in their own schema
+-- would install PostGIS there too -- and then dropping that schema takes the
+-- geography type with it.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA public;  -- gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS "postgis"  WITH SCHEMA public;  -- geography(Point)
+CREATE EXTENSION IF NOT EXISTS "pg_trgm"  WITH SCHEMA public;  -- fuzzy name search
+CREATE EXTENSION IF NOT EXISTS "citext"   WITH SCHEMA public;  -- case-insensitive email
 
 -- ---------------------------------------------------------------------------
 -- Enumerations
