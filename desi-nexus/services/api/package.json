@@ -1,0 +1,18 @@
+{
+  "name": "@desi-nexus/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DESI-NEXUS marketplace API: gig matching, cultural taxonomy and Stripe Connect escrow.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "tsc -p tsconfig.json && node --test \"dist/test/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -55,6 +55,27 @@ jobs:
       - name: Run tests
         run: pytest tests/ -q
 
+  desi-nexus:
+    name: DESI-NEXUS API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desi-nexus/services/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck and test
+        # The build is part of the test script: the suite runs against the
+        # compiled output, so a type error fails here rather than at runtime.
+        run: npm test
+
   ansible:
     name: Ansible
     runs-on: ubuntu-latest
