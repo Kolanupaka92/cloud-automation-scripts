@@ -5,13 +5,15 @@
  * over an in-memory store and a fake Stripe gateway and exercise real routes.
  */
 import { randomUUID } from "node:crypto";
+import { Redis } from "ioredis";
 import { Router, readBody, send, HttpError, type RequestContext } from "./http/router.js";
 import { errorBoundary, rateLimit } from "./http/middleware.js";
 import { registerAuthRoutes } from "./http/routes/auth.js";
 import { registerGigRoutes } from "./http/routes/gigs.js";
 import { registerPaymentRoutes } from "./http/routes/payments.js";
 import { registerDiscoveryRoutes } from "./http/routes/discovery.js";
-import { RateLimiter } from "./infra/rateLimit.js";
+import { InMemoryRateLimiter, type RateLimiter } from "./infra/rateLimit.js";
+import { RedisRateLimiter } from "./infra/redisRateLimit.js";
 import { createInMemoryStore, type Store } from "./infra/store.js";
 import type { StripeGateway } from "./infra/stripe/index.js";
 import { FakeStripeGateway } from "./infra/stripe/fake.js";
@@ -45,8 +47,50 @@ export function buildDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     store: overrides.store ?? createInMemoryStore(),
     stripe: overrides.stripe ?? defaultStripeGateway(),
     bus: overrides.bus ?? new InMemoryEventBus(),
-    limiter: overrides.limiter ?? new RateLimiter(),
+    limiter: overrides.limiter ?? defaultRateLimiter(),
   };
+}
+
+/**
+ * Connections this process opened and must close on the way out. Handing back
+ * a closer keeps the ownership obvious: whoever built the dependency closes it,
+ * and a caller who passed its own limiter in is left alone.
+ */
+const owned: Array<() => Promise<void>> = [];
+
+export async function shutdownDeps(): Promise<void> {
+  await Promise.allSettled(owned.map((close) => close()));
+  owned.length = 0;
+}
+
+/**
+ * A shared limiter when Redis is configured, the in-process one otherwise.
+ *
+ * Production refuses the in-process limiter outright. With more than one
+ * replica it is not a limit at all: each pod keeps its own buckets, so the
+ * effective allowance is whatever was configured multiplied by the number of
+ * pods. Failing to start is the honest outcome, because the alternative is a
+ * service that looks rate limited and is not.
+ */
+function defaultRateLimiter(): RateLimiter {
+  const url = process.env.REDIS_URL;
+  if (!url) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("REDIS_URL is required in production: per-pod rate limits are not limits");
+    }
+    return new InMemoryRateLimiter();
+  }
+  const client = new Redis(url, {
+    // Fail fast rather than queueing requests behind a dead Redis; the limiter
+    // degrades to fail-open, which is the behaviour we want during an outage.
+    maxRetriesPerRequest: 2,
+    enableOfflineQueue: false,
+  });
+  client.on("error", (error) => console.error("[redis] client error", error));
+  owned.push(async () => {
+    await client.quit().catch(() => client.disconnect());
+  });
+  return new RedisRateLimiter(client);
 }
 
 /**

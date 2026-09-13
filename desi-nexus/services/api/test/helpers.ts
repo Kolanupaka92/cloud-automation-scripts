@@ -11,7 +11,7 @@ import { createHmac } from "node:crypto";
 import { buildDeps, buildRouter, type AppDeps } from "../src/app.js";
 import type { HttpResult, RequestContext } from "../src/http/router.js";
 import { FakeStripeGateway } from "../src/infra/stripe/fake.js";
-import { RateLimiter } from "../src/infra/rateLimit.js";
+import { InMemoryRateLimiter } from "../src/infra/rateLimit.js";
 
 export const CONFIG = {
   tokenSecret: "test-token-secret-long-enough-for-hmac",
@@ -38,7 +38,7 @@ export function harness(store?: AppDeps["store"]): Harness {
   const deps = buildDeps({
     config: CONFIG,
     stripe,
-    limiter: new RateLimiter(() => Date.now()),
+    limiter: new InMemoryRateLimiter(() => Date.now()),
     ...(store ? { store } : {}),
   });
   const router = buildRouter(deps);

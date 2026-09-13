@@ -6,6 +6,11 @@
  * portfolio and talent-search endpoints are the crown jewels, and an
  * unauthenticated crawler walking the talent index is the most likely way a
  * competitor bootstraps their supply side.
+ *
+ * `check` is asynchronous because the only correct implementation for more than
+ * one replica is a shared one. See `RedisRateLimiter` in ./redisRateLimit.ts:
+ * per-process buckets let an attacker multiply their allowance by the replica
+ * count, which is not a limit so much as a suggestion.
  */
 export interface BucketPolicy {
   readonly capacity: number;
@@ -39,17 +44,24 @@ export interface RateDecision {
   readonly retryAfter: number;
 }
 
+/** What the middleware depends on; the backing store is an implementation detail. */
+export interface RateLimiter {
+  check(identity: string, policyName?: PolicyName, cost?: number): Promise<RateDecision>;
+}
+
 /**
- * In-process for now. In production this is backed by Redis with the same
- * interface, because per-pod buckets let an attacker multiply their allowance
- * by the replica count.
+ * The in-process limiter.
+ *
+ * Correct for a single replica, and used by the tests and local runs. It is
+ * deliberately not the production default: with two pods behind a load
+ * balancer each keeps its own buckets, so the effective limit is doubled.
  */
-export class RateLimiter {
+export class InMemoryRateLimiter implements RateLimiter {
   private readonly buckets = new Map<string, Bucket>();
 
   constructor(private readonly clock: () => number = () => Date.now()) {}
 
-  check(identity: string, policyName: PolicyName = "default", cost = 1): RateDecision {
+  async check(identity: string, policyName: PolicyName = "default", cost = 1): Promise<RateDecision> {
     const policy: BucketPolicy = POLICIES[policyName];
     const key = `${policyName}:${identity}`;
     const now = this.clock();

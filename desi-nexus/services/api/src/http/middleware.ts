@@ -48,7 +48,7 @@ export function errorBoundary(): Middleware {
 export function rateLimit(limiter: RateLimiter, policy: PolicyName = "default"): Middleware {
   return async (ctx, next) => {
     const identity = ctx.auth?.sub ?? ctx.ip;
-    const decision = limiter.check(identity, policy);
+    const decision = await limiter.check(identity, policy);
     if (!decision.allowed) {
       throw new HttpError(429, "rate_limited", "too many requests; slow down", {
         retryAfterSeconds: decision.retryAfter,

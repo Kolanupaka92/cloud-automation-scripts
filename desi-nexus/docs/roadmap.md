@@ -50,16 +50,15 @@ repository today versus what is specified but unbuilt.
 
 ## What to build next, in order
 
-1. **Redis-backed rate limiting.** Per-pod buckets are a real hole once there is
-   more than one replica — see `docs/security.md`.
-2. **The outbox relay.** The table and the publish calls exist; the poller does
-   not. Until it does, notifications depend on the in-process bus.
-3. **A run against Stripe test mode.** The gateway is verified against a local
+1. **The outbox relay.** The table and the publish calls exist; the poller does
+   not. Until it does, notifications depend on the in-process bus, so a restart
+   between a gig going live and its notifications firing loses them.
+2. **A run against Stripe test mode.** The gateway is verified against a local
    stand-in, which checks the request shape and the error handling but not
    Stripe's own behaviour. Point the end-to-end suite at test-mode keys before
    the pilot.
-4. **Notification transports**, then the WebSocket layer.
-5. **Next.js host dashboard**, then the mobile clients.
+3. **Notification transports**, then the WebSocket layer.
+4. **Next.js host dashboard**, then the mobile clients.
 
 ### Done since the first cut
 
@@ -71,6 +70,11 @@ in-memory store could not have surfaced — see the README.
 `StripeGateway` interface the fake implements. Live payments engage when
 `STRIPE_API_KEY` is set; production refuses to start without it, so there is no
 configuration in which the service quietly accepts bookings that move no money.
+
+**Shared rate limiting.** Token buckets moved into Redis, refilled and spent
+inside one Lua script so concurrent requests cannot overspend them. Production
+refuses to start without `REDIS_URL`: per-pod buckets multiply the effective
+allowance by the replica count, which is not a limit.
 
 ## Metrics to instrument from day one
 

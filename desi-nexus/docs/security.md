@@ -123,10 +123,22 @@ expensive endpoints all require a token. Only the first hop of `X-Forwarded-For`
 is trusted; taking the whole header would let a client spoof its way out of its
 own bucket.
 
-> **Production note.** The limiter is currently in-process. Per-pod buckets let
-> an attacker multiply their allowance by the replica count, so this must be
-> backed by Redis before the pilot takes real traffic. The interface is
-> unchanged by that swap.
+**The buckets are shared, not per-pod.** They live in Redis, and the refill and
+spend happen inside one Lua script. Both halves matter: per-process buckets mean
+an attacker's effective allowance is whatever was configured multiplied by the
+replica count, and a refill-then-spend done as separate round trips lets
+concurrent requests each read the same token count and each spend it. Production
+refuses to start without `REDIS_URL`, because a service that looks rate limited
+and is not is worse than one that will not boot.
+
+Time inside the script comes from Redis rather than the caller: pods drift, and
+a bucket stamped by a fast clock would otherwise refuse traffic everywhere else
+until real time caught up.
+
+A Redis outage fails **open** by default. The edge WAF still carries the coarse
+limits, so this is a reduction in protection rather than its removal, and an
+outage that blocks every login is a worse incident than one that briefly lets a
+scraper run faster. Deployments that disagree can pass `onError: "closed"`.
 
 ## Error handling
 
@@ -136,10 +148,9 @@ error in the logs.
 
 ## Known gaps before the pilot
 
-1. The rate limiter must move to Redis (above).
-2. Secrets are read from environment variables; these should come from a secrets
+1. Secrets are read from environment variables; these should come from a secrets
    manager with rotation.
-3. No automated key rotation for the token signing secret yet — needs a key-ID
+2. No automated key rotation for the token signing secret yet — needs a key-ID
    claim and a two-key verification window.
-4. The dispute resolution flow has no evidence-upload path.
-5. Penetration test not yet run. This is Phase 3 work in the roadmap.
+3. The dispute resolution flow has no evidence-upload path.
+4. Penetration test not yet run. This is Phase 3 work in the roadmap.

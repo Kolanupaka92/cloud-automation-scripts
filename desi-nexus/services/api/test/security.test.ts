@@ -9,7 +9,7 @@ import {
   TokenError,
 } from "../src/infra/tokens.js";
 import { assertPasswordPolicy, hashPassword, verifyPassword, PasswordPolicyError } from "../src/infra/passwords.js";
-import { RateLimiter } from "../src/infra/rateLimit.js";
+import { InMemoryRateLimiter } from "../src/infra/rateLimit.js";
 import { verifyWebhookSignature, WEBHOOK_TOLERANCE_SECONDS } from "../src/infra/stripe/index.js";
 import { canReceivePayouts, meetsVerification, type BaseUser } from "../src/domain/users.js";
 
@@ -86,34 +86,34 @@ test("short and obvious passwords are refused", () => {
   assert.doesNotThrow(() => assertPasswordPolicy("sangeet-night-in-frisco"));
 });
 
-test("the rate limiter drains, refuses, then refills", () => {
+test("the rate limiter drains, refuses, then refills", async () => {
   let now = 0;
-  const limiter = new RateLimiter(() => now);
+  const limiter = new InMemoryRateLimiter(() => now);
 
   for (let i = 0; i < 5; i += 1) {
-    assert.equal(limiter.check("usr_1", "otp").allowed, true, `request ${i} should pass`);
+    assert.equal((await limiter.check("usr_1", "otp")).allowed, true, `request ${i} should pass`);
   }
-  const blocked = limiter.check("usr_1", "otp");
+  const blocked = await limiter.check("usr_1", "otp");
   assert.equal(blocked.allowed, false);
   assert.ok(blocked.retryAfter > 0);
 
   // An hour later the bucket has refilled.
   now += 3_600_000;
-  assert.equal(limiter.check("usr_1", "otp").allowed, true);
+  assert.equal((await limiter.check("usr_1", "otp")).allowed, true);
 });
 
-test("one identity's limit does not affect another's", () => {
-  const limiter = new RateLimiter(() => 0);
-  for (let i = 0; i < 10; i += 1) limiter.check("noisy", "auth");
-  assert.equal(limiter.check("noisy", "auth").allowed, false);
-  assert.equal(limiter.check("quiet", "auth").allowed, true);
+test("one identity's limit does not affect another's", async () => {
+  const limiter = new InMemoryRateLimiter(() => 0);
+  for (let i = 0; i < 10; i += 1) await limiter.check("noisy", "auth");
+  assert.equal((await limiter.check("noisy", "auth")).allowed, false);
+  assert.equal((await limiter.check("quiet", "auth")).allowed, true);
 });
 
-test("the discovery bucket is the one that stops a portfolio scraper", () => {
-  const limiter = new RateLimiter(() => 0);
+test("the discovery bucket is the one that stops a portfolio scraper", async () => {
+  const limiter = new InMemoryRateLimiter(() => 0);
   let allowed = 0;
   for (let i = 0; i < 500; i += 1) {
-    if (limiter.check("scraper", "discovery").allowed) allowed += 1;
+    if ((await limiter.check("scraper", "discovery")).allowed) allowed += 1;
   }
   assert.equal(allowed, 120, "a burst should be capped at the bucket capacity");
 });

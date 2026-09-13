@@ -74,7 +74,19 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U desi_nexus"
+          --health-cmd "pg_isready -U desi_nexus -d desi_nexus_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      # The rate limiter's buckets live in Redis, and the tests that prove they
+      # are shared across replicas need a real one.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -84,6 +96,7 @@ jobs:
       # skip, which would let a broken repository layer go green.
       DESI_NEXUS_TEST_DATABASE_URL: >-
         postgresql://desi_nexus:desi_nexus_ci@localhost:5432/desi_nexus_test
+      DESI_NEXUS_TEST_REDIS_URL: redis://localhost:6379/9
 
     steps:
       - uses: actions/checkout@v4
@@ -99,17 +112,18 @@ jobs:
         # The build is part of the test script: the suite runs against the
         # compiled output, so a type error fails here rather than at runtime.
         #
-        # The skip check matters as much as the pass count: the database tests
-        # skip themselves when no DATABASE_URL is set, and a skipped suite still
-        # reports success -- so a misconfigured service would quietly stop
-        # covering the repository layer while CI stayed green.
+        # The skip check matters as much as the pass count: the database and
+        # Redis tests skip themselves when their service is not configured, and
+        # a skipped suite still reports success -- so a misconfigured service
+        # would quietly stop covering the repository or rate-limiting layer
+        # while CI stayed green.
         run: |
           set -o pipefail
           npm test 2>&1 | tee test-output.txt
           skipped=$(awk '/^# skipped/ {print $3; exit}' test-output.txt)
           echo "skipped: ${skipped:-unknown}"
           if [ "${skipped:-1}" != "0" ]; then
-            echo "::error::database-backed tests were skipped; check the postgres service"
+            echo "::error::service-backed tests were skipped; check the postgres and redis services"
             exit 1
           fi
 

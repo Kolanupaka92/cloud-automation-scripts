@@ -18,12 +18,13 @@ hyper-local marketplace reaches liquidity in a single metro.
 | `services/api/src/http/` | Router, middleware and route modules |
 | `services/api/src/infra/postgres/` | PostgreSQL repository implementations |
 | `services/api/src/infra/stripe/` | Payment contract, the live gateway, and the fake |
-| `services/api/test/` | 155 tests, including the full booking flow run over both stores |
+| `services/api/src/infra/redisRateLimit.ts` | Shared token buckets, refilled and spent atomically |
+| `services/api/test/` | 170 tests, including the full booking flow run over both stores |
 | `db/migrations/` | PostgreSQL schema, seeded reference data, application role |
 | `docs/` | Architecture, security posture, API specification, roadmap |
 
 The domain core, the security layer, the HTTP surface, PostgreSQL persistence
-and the Stripe integration are real and runnable. Persistence sits behind
+the Stripe integration and shared rate limiting are real and runnable. Persistence sits behind
 repository interfaces with both an in-memory and a PostgreSQL implementation,
 and the same end-to-end booking test runs against each — so the swap is proven
 transparent rather than assumed. Payments sit behind the same kind of interface,
@@ -46,12 +47,18 @@ To also run the database-backed tests, point them at a PostgreSQL with PostGIS:
 
 ```bash
 export DESI_NEXUS_TEST_DATABASE_URL=postgresql://user@localhost:5432/desi_nexus_test
-npm test          # 155 tests instead of 128
+npm test          # 170 tests instead of 128
 ```
 
-Without that variable the 27 database tests skip and the rest still run. CI sets
-it and fails the build if they skip, because a skipped suite still reports
-success and would quietly stop covering the repository layer.
+The rate limiter's tests want a Redis:
+
+```bash
+export DESI_NEXUS_TEST_REDIS_URL=redis://localhost:6379/9
+```
+
+Without those variables the 42 service-backed tests skip and the rest still run.
+CI sets both and fails the build if anything skips, because a skipped suite
+still reports success and would quietly stop covering those layers.
 
 Payments use the fake gateway unless `STRIPE_API_KEY` is set. Production refuses
 to start without one, so there is no configuration in which the service quietly
@@ -125,7 +132,7 @@ travel off-platform, which is the leakage the escrow exists to prevent.
 cd services/api && npm test
 ```
 
-155 tests. Beyond the unit coverage, the suite asserts the things that would
+170 tests. Beyond the unit coverage, the suite asserts the things that would
 actually hurt: that a booking cannot be confirmed before its deposit clears,
 that a replayed Stripe webhook cannot double-fund, that a released escrow cannot
 be refunded, that dispute resolutions account for every held cent, that
@@ -167,6 +174,21 @@ Four defects the in-memory store could not have surfaced:
    `REVOKE UPDATE ON ledger_entries` was unqualified and resolved through
    `search_path`. Where those differed, the ledger stayed updatable — exactly
    the guarantee the migration exists to provide.
+
+### What moving the rate limiter to Redis is for
+
+Per-process buckets are not a limit once there is more than one replica: each
+pod keeps its own, so an attacker's effective allowance is whatever was
+configured multiplied by the number of pods. There is a test asserting exactly
+that failure against the in-process limiter, next to one asserting two Redis-
+backed limiters share a single budget.
+
+The refill and the spend happen inside one Lua script, because done as separate
+round trips two concurrent requests both read the same token count and both
+spend it — so a test fires six times the capacity in parallel across three
+connections and asserts exactly the capacity is allowed. Time comes from Redis
+rather than the caller, since a bucket stamped by a pod with a fast clock would
+otherwise refuse traffic on every other pod until real time caught up.
 
 ### What wiring up Stripe found
 
