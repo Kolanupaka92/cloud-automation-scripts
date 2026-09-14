@@ -122,7 +122,17 @@ class PgUsers implements UserRepository {
   }
 }
 
-const USER_COLUMNS = `id, email, phone_e164, display_name, roles, verification, mfa_enabled,
+/**
+ * `roles` is cast to text[] on the way out on purpose.
+ *
+ * It is declared `user_role[]`, and node-postgres only has parsers for the
+ * built-in array types -- a custom enum array comes back as the raw string
+ * "{host}" rather than an array, and the first `.map` on it throws. The cast
+ * hands back a type the driver does parse. `languages` is already text[], so
+ * it needs no help.
+ */
+const USER_COLUMNS = `id, email, phone_e164, display_name, roles::text[] AS roles,
+  verification, mfa_enabled,
   ST_Y(home_base::geometry) AS lat, ST_X(home_base::geometry) AS lng,
   metro_code, languages, suspended_at, created_at`;
 
@@ -503,6 +513,27 @@ class PgGigs implements GigRepository {
       `SELECT id FROM gigs WHERE host_id = $1 ORDER BY created_at DESC`,
       [hostId],
     );
+    const gigs = await Promise.all(rows.map((row) => loadGig(this.db, row.id)));
+    return gigs.filter((gig): gig is Gig => gig !== undefined);
+  }
+
+  async open(specialties?: readonly string[]): Promise<Gig[]> {
+    // The WHERE clause mirrors the partial index in 001_init.sql exactly, so
+    // the planner can use it; widening it here would quietly turn this into a
+    // sequential scan on the busiest read in the vendor app.
+    const rows = specialties?.length
+      ? await this.db.query<{ id: string }>(
+          `SELECT id FROM gigs
+           WHERE state IN ('Open', 'ApplicationsReview')
+             AND specialty_code = ANY($1::text[])
+           ORDER BY event_date`,
+          [specialties],
+        )
+      : await this.db.query<{ id: string }>(
+          `SELECT id FROM gigs
+           WHERE state IN ('Open', 'ApplicationsReview')
+           ORDER BY event_date`,
+        );
     const gigs = await Promise.all(rows.map((row) => loadGig(this.db, row.id)));
     return gigs.filter((gig): gig is Gig => gig !== undefined);
   }

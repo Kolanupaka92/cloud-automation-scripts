@@ -15,6 +15,8 @@ import { registerDiscoveryRoutes } from "./http/routes/discovery.js";
 import { InMemoryRateLimiter, type RateLimiter } from "./infra/rateLimit.js";
 import { RedisRateLimiter } from "./infra/redisRateLimit.js";
 import { createInMemoryStore, type Store } from "./infra/store.js";
+import { connect } from "./infra/postgres/db.js";
+import { createPostgresStore } from "./infra/postgres/store.js";
 import type { StripeGateway } from "./infra/stripe/index.js";
 import { FakeStripeGateway } from "./infra/stripe/fake.js";
 import { liveStripeFromEnv } from "./infra/stripe/live.js";
@@ -36,6 +38,13 @@ export interface AppDeps {
   readonly limiter: RateLimiter;
 }
 
+/**
+ * Connections this process opened and must close on the way out. Handing back
+ * a closer keeps the ownership obvious: whoever built the dependency closes it,
+ * and a caller who passed its own store or limiter in is left alone.
+ */
+const owned: Array<() => Promise<void>> = [];
+
 export function buildDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   const config: AppConfig = overrides.config ?? {
     tokenSecret: process.env.DESI_NEXUS_TOKEN_SECRET ?? randomUUID(),
@@ -44,23 +53,41 @@ export function buildDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   };
   return {
     config,
-    store: overrides.store ?? createInMemoryStore(),
+    store: overrides.store ?? defaultStore(),
     stripe: overrides.stripe ?? defaultStripeGateway(),
     bus: overrides.bus ?? new InMemoryEventBus(),
     limiter: overrides.limiter ?? defaultRateLimiter(),
   };
 }
 
-/**
- * Connections this process opened and must close on the way out. Handing back
- * a closer keeps the ownership obvious: whoever built the dependency closes it,
- * and a caller who passed its own limiter in is left alone.
- */
-const owned: Array<() => Promise<void>> = [];
-
 export async function shutdownDeps(): Promise<void> {
   await Promise.allSettled(owned.map((close) => close()));
   owned.length = 0;
+}
+
+/**
+ * PostgreSQL when a database is configured, in-memory otherwise.
+ *
+ * Production refuses the in-memory store for the obvious reason: it loses every
+ * user, gig and ledger entry on restart, and a marketplace that forgets a
+ * booking is worse than one that will not start.
+ */
+function defaultStore(): Store {
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("DATABASE_URL is required in production: the in-memory store is not durable");
+    }
+    return createInMemoryStore();
+  }
+  const db = connect({
+    connectionString: url,
+    // Behind a transaction pooler (Supabase's 6543, PgBouncer) the server holds
+    // far fewer connections than clients think they have, so keep this modest.
+    max: Number(process.env.DATABASE_POOL_MAX ?? 10),
+  });
+  owned.push(() => db.close());
+  return createPostgresStore(db);
 }
 
 /**

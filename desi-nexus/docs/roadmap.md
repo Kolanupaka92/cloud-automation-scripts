@@ -46,19 +46,25 @@ repository today versus what is specified but unbuilt.
 | PostgreSQL repository implementations | **built**, with the booking flow tested end to end against a real database |
 | Application role and privilege posture | **built** (`003_app_role.sql`) |
 | Penetration test | not started |
-| App Store / Play Store submission | not started |
+| App Store / Play Store submission | **deferred** — web-first until demand justifies a mobile build |
 
 ## What to build next, in order
 
 1. **The outbox relay.** The table and the publish calls exist; the poller does
    not. Until it does, notifications depend on the in-process bus, so a restart
    between a gig going live and its notifications firing loses them.
-2. **A run against Stripe test mode.** The gateway is verified against a local
-   stand-in, which checks the request shape and the error handling but not
-   Stripe's own behaviour. Point the end-to-end suite at test-mode keys before
-   the pilot.
-3. **Notification transports**, then the WebSocket layer.
-4. **Next.js host dashboard**, then the mobile clients.
+2. **A run against Stripe test mode**, once the LLC is registered and keys can
+   be issued. The gateway is verified against a local stand-in, which checks the
+   request shape and the error handling but not Stripe's own behaviour.
+3. **Notification transports**, then the WebSocket layer. The web app already
+   tells hosts that vendors are being notified in waves, which is currently only
+   true in-process.
+4. **Portfolio uploads** (presigned S3), so vendor profiles carry work samples.
+5. **Escrow screens**, once the LLC exists and Stripe keys can be issued.
+
+**Mobile is deliberately deferred** until demand justifies it. The web app is
+responsive and works at phone width today, so a vendor can accept a gig from
+their phone without an app store in the loop.
 
 ### Done since the first cut
 
@@ -75,6 +81,12 @@ configuration in which the service quietly accepts bookings that move no money.
 inside one Lua script so concurrent requests cannot overspend them. Production
 refuses to start without `REDIS_URL`: per-pod buckets multiply the effective
 allowance by the replica count, which is not a limit.
+
+**The web app.** Next.js 15 covering the whole booking loop — register, verify,
+post and publish a gig, a vendor's ranked feed, apply, and book. Driven
+end to end in a real browser against a real API and a real PostgreSQL. Mobile
+is deliberately deferred until demand justifies it; the web app is responsive
+and works at phone width today.
 
 ## Metrics to instrument from day one
 

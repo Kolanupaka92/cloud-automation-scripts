@@ -19,6 +19,8 @@ if (process.env.NODE_ENV === "production") {
     "STRIPE_API_KEY",
     // And without this the rate limits are per-pod, which is to say not limits.
     "REDIS_URL",
+    // And without this every booking is lost on the next restart.
+    "DATABASE_URL",
   ]) {
     if (!process.env[required]) {
       console.error(`refusing to start: ${required} is not set`);

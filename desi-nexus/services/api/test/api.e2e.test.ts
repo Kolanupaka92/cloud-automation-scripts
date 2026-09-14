@@ -461,4 +461,86 @@ test("an unhandled Stripe event is acknowledged rather than retried forever", as
   assert.equal((result.body as { handled: boolean }).handled, false);
 });
 
+test("a host sees only their own gigs on the dashboard", async () => {
+  const h = harness();
+  const owner = await onboard(h, { email: "list-owner@frisco.test", roles: ["host"], homeBase: FRISCO });
+  const stranger = await onboard(h, { email: "list-other@frisco.test", roles: ["host"], homeBase: FRISCO });
 
+  await h.call("POST", "/v1/gigs", { token: owner.token, body: BRIEF });
+  await h.call("POST", "/v1/gigs", { token: owner.token, body: BRIEF });
+  await h.call("POST", "/v1/gigs", { token: stranger.token, body: BRIEF });
+
+  const mine = await h.call("GET", "/v1/me/gigs", { token: owner.token });
+  assert.equal(mine.status, 200, JSON.stringify(mine.body));
+  const gigs = (mine.body as { gigs: { hostId: string }[] }).gigs;
+  assert.equal(gigs.length, 2);
+  assert.ok(gigs.every((gig) => gig.hostId === owner.userId), "another host's gig leaked into the list");
+
+  const theirs = await h.call("GET", "/v1/me/gigs", { token: stranger.token });
+  assert.equal((theirs.body as { gigs: unknown[] }).gigs.length, 1);
+});
+
+test("a vendor without a profile is told to make one rather than shown nothing", async () => {
+  const h = harness();
+  const vendor = await onboard(h, { email: "bare@plano.test", roles: ["crew"], homeBase: PLANO });
+  const result = await h.call("GET", "/v1/discover/gigs", { token: vendor.token });
+  assert.equal(result.status, 400);
+  assert.equal((result.body as { error: { code: string } }).error.code, "no_profile");
+});
+
+test("discovery shows a vendor the open gigs they can actually take, ranked", async () => {
+  const h = harness();
+  const host = await onboard(h, { email: "disc-host@frisco.test", roles: ["host"], homeBase: FRISCO });
+  const vendor = await payoutReadyVendor(h, "disc-mua@plano.test");
+
+  // A draft gig, and a published one. Only the published one is applicable.
+  await h.call("POST", "/v1/gigs", { token: host.token, body: BRIEF });
+  const live = await h.call("POST", "/v1/gigs", { token: host.token, body: BRIEF });
+  const liveId = (live.body as { gig: { id: string } }).gig.id;
+  await h.call("POST", `/v1/gigs/${liveId}/publish`, { token: host.token });
+
+  // And one for a speciality this vendor does not offer.
+  const other = await h.call("POST", "/v1/gigs", {
+    token: host.token,
+    body: { ...BRIEF, specialty: "dj" },
+  });
+  const otherId = (other.body as { gig: { id: string } }).gig.id;
+  await h.call("POST", `/v1/gigs/${otherId}/publish`, { token: host.token });
+
+  const found = await h.call("GET", "/v1/discover/gigs", { token: vendor.token });
+  assert.equal(found.status, 200, JSON.stringify(found.body));
+  const rows = (found.body as {
+    gigs: { gig: { id: string }; score: number; alreadyApplied: boolean }[];
+  }).gigs;
+
+  assert.deepEqual(rows.map((row) => row.gig.id), [liveId], "only the open, in-speciality gig should show");
+  assert.ok((rows[0]?.score ?? 0) > 0, "a listed gig should carry the vendor's own match score");
+  assert.equal(rows[0]?.alreadyApplied, false);
+});
+
+test("a gig a vendor already applied to is marked, not hidden", async () => {
+  const h = harness();
+  const host = await onboard(h, { email: "disc2-host@frisco.test", roles: ["host"], homeBase: FRISCO });
+  const vendor = await payoutReadyVendor(h, "disc2-mua@plano.test");
+
+  const created = await h.call("POST", "/v1/gigs", { token: host.token, body: BRIEF });
+  const gigId = (created.body as { gig: { id: string } }).gig.id;
+  await h.call("POST", `/v1/gigs/${gigId}/publish`, { token: host.token });
+  await h.call("POST", `/v1/gigs/${gigId}/applications`, {
+    token: vendor.token,
+    body: { quotedRateCents: 60_000 },
+  });
+
+  const found = await h.call("GET", "/v1/discover/gigs", { token: vendor.token });
+  const rows = (found.body as { gigs: { gig: { id: string }; alreadyApplied: boolean }[] }).gigs;
+  const row = rows.find((entry) => entry.gig.id === gigId);
+  assert.ok(row, "the gig should still be listed");
+  assert.equal(row.alreadyApplied, true, "so the vendor is not invited to apply twice");
+});
+
+test("a host cannot use the vendor discovery feed", async () => {
+  const h = harness();
+  const host = await onboard(h, { email: "nosy-host@frisco.test", roles: ["host"], homeBase: FRISCO });
+  const result = await h.call("GET", "/v1/discover/gigs", { token: host.token });
+  assert.equal(result.status, 403);
+});

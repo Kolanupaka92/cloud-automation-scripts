@@ -1,0 +1,203 @@
+/*
+ * One palette, defined once.
+ *
+ * Warm golds and deep maroons because that is the register the market already
+ * reads as celebratory; the neutrals stay cool so the accent does the work and
+ * long forms remain readable rather than shouting.
+ */
+:root {
+  --marigold: #d98324;
+  --marigold-soft: #f6e6d2;
+  --maroon: #7a1f3d;
+  --maroon-soft: #f5e4ea;
+  --ink: #1c1917;
+  --ink-soft: #57534e;
+  --ink-faint: #8b857f;
+  --paper: #fdfbf7;
+  --card: #ffffff;
+  --line: #e7e2da;
+  --green: #1f7a53;
+  --green-soft: #e3f3ec;
+  --amber-soft: #fdf3d8;
+  --amber-ink: #8a6212;
+
+  --radius: 10px;
+  --radius-lg: 16px;
+  --shadow: 0 1px 2px rgba(28, 25, 23, 0.05), 0 4px 16px rgba(28, 25, 23, 0.05);
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--maroon); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3 { line-height: 1.2; margin: 0 0 0.5rem; letter-spacing: -0.015em; }
+h1 { font-size: 2.15rem; font-family: var(--serif); }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 1.05rem; }
+p { margin: 0 0 1rem; }
+
+.shell { max-width: 1060px; margin: 0 auto; padding: 0 20px; }
+.stack > * + * { margin-top: 1rem; }
+
+/* --- chrome ------------------------------------------------------------- */
+
+.masthead {
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.masthead .shell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 62px;
+  flex-wrap: wrap;
+}
+.wordmark {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.wordmark span { color: var(--marigold); }
+.masthead nav { display: flex; align-items: center; gap: 18px; font-size: 0.92rem; flex-wrap: wrap; }
+.masthead nav a { color: var(--ink-soft); }
+
+.foot {
+  border-top: 1px solid var(--line);
+  margin-top: 64px;
+  padding: 28px 0 48px;
+  color: var(--ink-faint);
+  font-size: 0.87rem;
+}
+
+/* --- surfaces ----------------------------------------------------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+.card + .card { margin-top: 16px; }
+.card h2, .card h3 { margin-top: 0; }
+
+.grid { display: grid; gap: 16px; }
+@media (min-width: 720px) {
+  .grid.two { grid-template-columns: 1fr 1fr; }
+  .grid.three { grid-template-columns: repeat(3, 1fr); }
+}
+
+.muted { color: var(--ink-soft); }
+.faint { color: var(--ink-faint); font-size: 0.87rem; }
+
+/* --- controls ----------------------------------------------------------- */
+
+label { display: block; font-weight: 550; font-size: 0.9rem; margin-bottom: 5px; }
+.field + .field { margin-top: 14px; }
+.hint { font-size: 0.82rem; color: var(--ink-faint); margin-top: 4px; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  font: inherit;
+  color: var(--ink);
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--marigold);
+  outline-offset: 1px;
+  border-color: var(--marigold);
+}
+textarea { min-height: 88px; resize: vertical; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--maroon);
+  color: #fff;
+  font: inherit;
+  font-weight: 560;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover { background: #651832; text-decoration: none; }
+.btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.btn.secondary { background: var(--card); color: var(--ink); border-color: var(--line); }
+.btn.secondary:hover { background: #faf7f2; }
+.btn.accent { background: var(--marigold); color: #2a1a06; }
+.btn.accent:hover { background: #c4741e; }
+.btn.small { padding: 7px 13px; font-size: 0.88rem; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spread { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+
+/* --- semantic bits ------------------------------------------------------ */
+
+.pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 550;
+  background: var(--marigold-soft);
+  color: #6b3d08;
+  border: 1px solid transparent;
+}
+.pill.tag { background: var(--maroon-soft); color: var(--maroon); }
+.pill.plain { background: transparent; border-color: var(--line); color: var(--ink-soft); }
+
+.state { display: inline-block; padding: 4px 11px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
+.state.draft { background: #f1efec; color: var(--ink-soft); }
+.state.open  { background: var(--amber-soft); color: var(--amber-ink); }
+.state.live  { background: var(--maroon-soft); color: var(--maroon); }
+.state.done  { background: var(--green-soft); color: var(--green); }
+.state.halt  { background: #fbe6e6; color: #9b2226; }
+
+.notice {
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: 0.92rem;
+  border: 1px solid;
+}
+.notice.error { background: #fdeceb; border-color: #f3c4c1; color: #9b2226; }
+.notice.info  { background: var(--amber-soft); border-color: #ecd9a4; color: var(--amber-ink); }
+.notice.good  { background: var(--green-soft); border-color: #bfe3d2; color: var(--green); }
+
+/* The match score bar: the number alone means nothing without its parts. */
+.meter { background: #efeae2; border-radius: 999px; height: 7px; overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--marigold); }
+.breakdown { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; font-size: 0.8rem; align-items: center; }
+.breakdown .meter { grid-column: 1 / -1; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); font-weight: 600; }
+
+.empty { text-align: center; padding: 40px 20px; color: var(--ink-faint); }

@@ -116,6 +116,25 @@ test("a user round-trips, geography and all", { skip }, async () => {
   assert.ok(Math.abs(loaded.homeBase.lng - FRISCO.lng) < 1e-6, `lng drifted: ${loaded.homeBase.lng}`);
 });
 
+test("roles come back as an array, not the raw enum-array literal", { skip }, async () => {
+  // users.roles is user_role[], and the driver has no parser for a custom enum
+  // array: without a cast it arrives as the string "{host,crew}" and the first
+  // .map on it throws. Asserting the shape is the only thing that catches it,
+  // because every field still reads fine as a string.
+  const user = aUser({ roles: ["host", "crew"] });
+  await store.users.create(user);
+
+  const loaded = await store.users.byId(user.id);
+  assert.ok(Array.isArray(loaded?.roles), `roles came back as ${typeof loaded?.roles}`);
+  assert.deepEqual(loaded?.roles.slice().sort(), ["crew", "host"]);
+
+  const byEmail = await store.users.byEmail(user.email);
+  assert.ok(Array.isArray(byEmail?.roles), "byEmail must parse roles too");
+
+  const updated = await store.users.update(user.id, { mfaEnabled: true });
+  assert.ok(Array.isArray(updated.roles), "update's RETURNING must parse roles too");
+});
+
 test("email lookup is case-insensitive, because CITEXT says so", { skip }, async () => {
   const user = aUser({ email: "Boutique@Frisco.Test" });
   await store.users.create(user);

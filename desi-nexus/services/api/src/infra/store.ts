@@ -53,6 +53,12 @@ export interface GigRepository {
   create(gig: Gig): Promise<Gig>;
   byId(id: string): Promise<Gig | undefined>;
   byHost(hostId: string): Promise<Gig[]>;
+  /**
+   * Gigs still taking applications, optionally narrowed to a set of
+   * specialities. Backed by the partial index on (specialty_code, event_date),
+   * so this stays an index lookup rather than a scan of every gig ever posted.
+   */
+  open(specialties?: readonly string[]): Promise<Gig[]>;
   save(gig: Gig): Promise<Gig>;
 }
 
@@ -194,6 +200,14 @@ class MemoryGigs implements GigRepository {
 
   async byHost(hostId: string): Promise<Gig[]> {
     return [...this.map.values()].filter((gig) => gig.hostId === hostId).map(clone);
+  }
+
+  async open(specialties?: readonly string[]): Promise<Gig[]> {
+    return [...this.map.values()]
+      .filter((gig) => gig.state === "Open" || gig.state === "ApplicationsReview")
+      .filter((gig) => !specialties?.length || specialties.includes(gig.brief.specialty))
+      .sort((a, b) => a.brief.eventDate.localeCompare(b.brief.eventDate))
+      .map(clone);
   }
 
   async save(gig: Gig): Promise<Gig> {

@@ -50,6 +50,76 @@ export function registerGigRoutes(router: Router, deps: AppDeps): void {
     requireRole("host"),
   );
 
+  /**
+   * The caller's own gigs, for the host dashboard.
+   *
+   * Deliberately not `/v1/gigs/mine`: the router matches in registration order,
+   * so a literal segment only beats `:gigId` by accident of ordering. A path
+   * that cannot collide is one less thing to get wrong later.
+   */
+  router.get(
+    "/v1/me/gigs",
+    async (ctx) => {
+      const gigs = await store.gigs.byHost(ctx.auth?.sub as string);
+      gigs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      return { status: 200, body: { gigs } };
+    },
+    requireAuth,
+    requireRole("host"),
+  );
+
+  /**
+   * Open gigs a vendor can apply to, ranked by their own match score.
+   *
+   * The same scoring the host sees, so a vendor is never puzzled about why a
+   * gig they were shown went to someone else -- and gigs they would be
+   * disqualified from are not shown at all.
+   */
+  router.get(
+    "/v1/discover/gigs",
+    async (ctx) => {
+      const vendorId = ctx.auth?.sub as string;
+      const profile = await store.profiles.crew(vendorId);
+      if (!profile) {
+        throw new HttpError(400, "no_profile", "create a vendor profile to see matching gigs");
+      }
+
+      const candidate = await toCandidate(profile, store);
+      const open = await store.gigs.open(profile.specialties);
+      const applied = new Set<string>();
+      for (const candidateGig of open) {
+        const existing = await store.applications.byGig(candidateGig.id);
+        if (existing.some((application) => application.vendorId === vendorId)) {
+          applied.add(candidateGig.id);
+        }
+      }
+
+      const scored = open
+        .map((candidateGig) => {
+          const [match] = rankCandidates([candidate], candidateGig.brief, {
+            minScore: 0,
+            includeRejected: true,
+          });
+          return {
+            gig: candidateGig,
+            score: match?.score ?? 0,
+            breakdown: match?.breakdown,
+            travelMiles: match?.travelMiles ?? 0,
+            travelFeeCents: match?.travelFeeCents ?? 0,
+            rejectedFor: match?.rejectedFor,
+            alreadyApplied: applied.has(candidateGig.id),
+          };
+        })
+        // A gig they cannot take is noise, not a listing.
+        .filter((row) => !row.rejectedFor)
+        .sort((a, b) => b.score - a.score);
+
+      return { status: 200, body: { gigs: scored, count: scored.length } };
+    },
+    requireAuth,
+    requireRole("crew", "creator"),
+  );
+
   router.get(
     "/v1/gigs/:gigId",
     async (ctx) => {

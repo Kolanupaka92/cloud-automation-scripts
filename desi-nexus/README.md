@@ -13,18 +13,20 @@ hyper-local marketplace reaches liquidity in a single metro.
 
 | Path | What it is |
 |---|---|
+| `apps/web/` | The host and vendor web app (Next.js 15, App Router) |
 | `services/api/src/domain/` | The domain core: taxonomy, money, geography, gig state machine, matching, escrow |
 | `services/api/src/infra/` | Tokens, password hashing, rate limiting, the Stripe boundary, repositories |
 | `services/api/src/http/` | Router, middleware and route modules |
 | `services/api/src/infra/postgres/` | PostgreSQL repository implementations |
 | `services/api/src/infra/stripe/` | Payment contract, the live gateway, and the fake |
 | `services/api/src/infra/redisRateLimit.ts` | Shared token buckets, refilled and spent atomically |
-| `services/api/test/` | 170 tests, including the full booking flow run over both stores |
+| `services/api/test/` | 176 tests, including the full booking flow run over both stores |
 | `db/migrations/` | PostgreSQL schema, seeded reference data, application role |
 | `docs/` | Architecture, security posture, API specification, roadmap |
 
 The domain core, the security layer, the HTTP surface, PostgreSQL persistence
-the Stripe integration and shared rate limiting are real and runnable. Persistence sits behind
+the Stripe integration, shared rate limiting and the web app are real and
+runnable. Persistence sits behind
 repository interfaces with both an in-memory and a PostgreSQL implementation,
 and the same end-to-end booking test runs against each — so the swap is proven
 transparent rather than assumed. Payments sit behind the same kind of interface,
@@ -47,7 +49,7 @@ To also run the database-backed tests, point them at a PostgreSQL with PostGIS:
 
 ```bash
 export DESI_NEXUS_TEST_DATABASE_URL=postgresql://user@localhost:5432/desi_nexus_test
-npm test          # 170 tests instead of 128
+npm test          # 176 tests instead of 128
 ```
 
 The rate limiter's tests want a Redis:
@@ -132,7 +134,7 @@ travel off-platform, which is the leakage the escrow exists to prevent.
 cd services/api && npm test
 ```
 
-170 tests. Beyond the unit coverage, the suite asserts the things that would
+176 tests. Beyond the unit coverage, the suite asserts the things that would
 actually hurt: that a booking cannot be confirmed before its deposit clears,
 that a replayed Stripe webhook cannot double-fund, that a released escrow cannot
 be refunded, that dispute resolutions account for every held cent, that
@@ -174,6 +176,34 @@ Four defects the in-memory store could not have surfaced:
    `REVOKE UPDATE ON ledger_entries` was unqualified and resolved through
    `search_path`. Where those differed, the ledger stayed updatable — exactly
    the guarantee the migration exists to provide.
+
+### What building the web app found
+
+Four defects that neither a type-check nor a unit test can see, all of them
+surfaced by driving a real browser through the real forms:
+
+1. **A function was being passed from a server component to a client
+   component.** React Server Components cannot serialise one, so the whole
+   register page 500'd. The helper is now imported on the client side instead.
+2. **`users.roles` came back as a string, not an array.** It is declared
+   `user_role[]`, and node-postgres has parsers only for the built-in array
+   types — a custom enum array arrives as the literal `"{host}"` and the first
+   `.map` on it throws. The column is cast to `text[]` on the way out. The
+   Postgres tests asserted `languages` (a `text[]`, which *is* parsed) but never
+   asserted `roles`, which is exactly how it slipped through.
+3. **`min="1" step="25"` on the rate inputs silently blocked the form.** Those
+   attributes make 1, 26, 51… the only valid values, so a vendor typing any
+   round number got a dead button and no message.
+4. **The publish confirmation could never be read.** On success the action
+   revalidates, the gig stops being a draft, and the button unmounts along with
+   the message it was holding. The confirmation now lives on the page itself,
+   which survives the re-render.
+
+There was also a fifth, found before the browser was involved: the PostgreSQL
+store was implemented and tested but **never actually selected at runtime** —
+`DATABASE_URL` was not read anywhere, so the service would have lost every
+booking on restart. It is now chosen the same way Stripe and Redis are, and
+production refuses to start without it.
 
 ### What moving the rate limiter to Redis is for
 

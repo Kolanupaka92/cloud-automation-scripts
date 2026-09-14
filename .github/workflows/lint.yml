@@ -127,6 +127,30 @@ jobs:
             exit 1
           fi
 
+  desi-nexus-web:
+    name: DESI-NEXUS Web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desi-nexus/apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        # A production build type-checks every route and catches the
+        # server/client boundary mistakes that only appear when React tries to
+        # serialise across it -- a plain tsc pass does not see those.
+        run: npm run build
   ansible:
     name: Ansible
     runs-on: ubuntu-latest
