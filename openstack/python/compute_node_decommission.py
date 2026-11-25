@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Remove a compute node from the region for good.
 
 Aggregates, nova services, neutron agents, then the Placement resource

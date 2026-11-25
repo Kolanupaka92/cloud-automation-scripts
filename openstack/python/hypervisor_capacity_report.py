@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Nova capacity and overcommit per compute node.
 
 Numbers come from Placement so they match what the scheduler actually sees.

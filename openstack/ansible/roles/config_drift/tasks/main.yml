@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Detect configuration drift without correcting it. Detection and remediation
 # are deliberately separate: an unexplained drift is an investigation, not a
 # thing to silently overwrite at 03:00.

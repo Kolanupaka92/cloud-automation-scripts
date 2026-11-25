@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Migrate one VMware VM to OpenStack.
 
 Phases: assess, snapshot, shutdown, export, convert, upload, provision,

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Find (and optionally delete) unowned resources in a region.
 
 Covers available volumes, snapshots whose source volume is gone, unassociated

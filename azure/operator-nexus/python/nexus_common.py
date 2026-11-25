@@ -1,3 +1,4 @@
+# Author: Sai Kolanupaka
 """Shared helpers for the Azure Operator Nexus automation scripts.
 
 Operator Nexus exposes bare metal machines (BMMs), racks, storage appliances and

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Unused Azure resources that are still being billed.
 
 Unattached managed disks, public IPs with no association, NICs on no VM,

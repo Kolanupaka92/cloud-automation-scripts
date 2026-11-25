@@ -1,3 +1,4 @@
+# Author: Sai Kolanupaka
 """Shared helpers for the Azure automation scripts.
 
 Authentication uses ``DefaultAzureCredential``, so the same script works from a

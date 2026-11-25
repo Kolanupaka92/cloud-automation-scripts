@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Baseline hardening for OpenStack control-plane and compute nodes.
 # Every control is individually toggleable so a site can opt out of anything
 # that conflicts with a local requirement.

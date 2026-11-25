@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Reconcile SentinelOne coverage against real infrastructure inventory.
 
 The console can only show you hosts it knows about, so a machine that never

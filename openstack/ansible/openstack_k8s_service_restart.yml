@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Controlled rolling restart of an OpenStack control-plane service running on
 # Kubernetes, with health verification before and after.
 #

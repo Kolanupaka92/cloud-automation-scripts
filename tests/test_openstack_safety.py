@@ -1,3 +1,4 @@
+# Author: Sai Kolanupaka
 """Regression tests for the OpenStack scripts that delete, migrate or gate.
 
 Cloud state is faked at the connection level; every resource handed to the

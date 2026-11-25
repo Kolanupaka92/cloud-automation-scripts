@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Pre-upgrade checks for a Pure FlashArray.
 
 Two things account for most aborted upgrades and both are cheap to check

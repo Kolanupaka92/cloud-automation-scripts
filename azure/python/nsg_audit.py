@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Audit NSGs for internet-exposed admin ports.
 
 With --effective it resolves the merged subnet + NIC rules where the

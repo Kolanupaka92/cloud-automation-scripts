@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Reconcile Nova against libvirt on a compute node.
 
 Four things turn up, and they are not the same problem:

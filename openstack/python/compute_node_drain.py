@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Drain a compute node before maintenance.
 
 Checks there is somewhere for the instances to go, disables nova-compute with

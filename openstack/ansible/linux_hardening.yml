@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Apply the security baseline to OpenStack nodes.
 #
 #   ansible-playbook linux_hardening.yml --check --diff        # preview

@@ -1,3 +1,4 @@
+# Author: Sai Kolanupaka
 """Shared helpers for the OpenStack automation scripts.
 
 Every script in this directory authenticates the same way and shares the same

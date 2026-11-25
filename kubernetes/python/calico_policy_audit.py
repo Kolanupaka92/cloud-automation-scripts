@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Audit Calico policy for gaps and unreachable rules.
 
 kubectl will tell you what exists. It will not tell you that a namespace has

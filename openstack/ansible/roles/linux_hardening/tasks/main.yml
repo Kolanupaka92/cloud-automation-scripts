@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Idempotent baseline hardening. Every task validates before it commits, so a
 # bad template can never lock the fleet out over SSH.
 

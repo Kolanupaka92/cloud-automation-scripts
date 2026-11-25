@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """NTP/chrony health and packet loss across a fleet.
 
 Clock skew shows up as something else first: Ceph flapping OSDs, Kubernetes

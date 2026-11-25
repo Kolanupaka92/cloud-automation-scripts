@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Audit security groups for over-permissive ingress.
 
 Severity is based on exposure: world-open admin ports (SSH, RDP, databases,

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """VM rightsizing from 30 days of Azure Monitor metrics.
 
 Uses p95 rather than averages, because an average hides the peak that makes a
