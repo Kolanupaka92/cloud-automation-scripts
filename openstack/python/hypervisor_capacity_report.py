@@ -19,6 +19,7 @@ from common import (
     pct,
     placement_capacity,
     render,
+    service_host,
     setup_logging,
     usable,
 )
@@ -43,7 +44,8 @@ def hypervisor_rows(conn, aggregate_hosts: set[str] | None) -> list[dict]:
 
     for hv in conn.compute.hypervisors(details=True):
         name = hv.name
-        if aggregate_hosts is not None and name not in aggregate_hosts:
+        host = service_host(hv)
+        if aggregate_hosts is not None and host not in aggregate_hosts:
             continue
 
         provider = capacity.get(name)
@@ -76,6 +78,7 @@ def hypervisor_rows(conn, aggregate_hosts: set[str] | None) -> list[dict]:
                 "mem_pct": pct(mem_used, mem_total),
                 "disk_pct": pct(disk_used, disk_total),
                 # Kept out of the default column set but useful in --format json.
+                "_host": host,
                 "_source": source,
                 "_vcpu_free": int(vcpu_total - vcpu_used),
                 "_mem_free_mb": int(mem_total - mem_used),

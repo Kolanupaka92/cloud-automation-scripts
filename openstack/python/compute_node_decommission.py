@@ -13,7 +13,7 @@ Defaults to a dry run. --execute is required to change anything.
 
 from __future__ import annotations
 
-from common import LOG, base_parser, confirm, connect, render, setup_logging
+from common import LOG, base_parser, confirm, connect, render, service_host, setup_logging
 
 COLUMNS = ("stage", "status", "object", "detail")
 
@@ -131,23 +131,56 @@ def delete_network_agents(conn, host: str, execute: bool, assume_yes: bool) -> l
     return rows
 
 
-def delete_resource_provider(conn, host: str, execute: bool, assume_yes: bool) -> list[dict]:
+def provider_names(conn, host: str) -> set[str]:
+    """Placement provider names for a service host, as Nova knows them.
+
+    Must be read before the services stage: deleting nova-compute removes the
+    hypervisor record that ties the two names together.
+    """
+    try:
+        return {hv.name for hv in conn.compute.hypervisors(details=True)
+                if service_host(hv) == host}
+    except Exception as exc:  # noqa: BLE001 - fall back to matching on the name
+        LOG.warning("could not list hypervisors: %s", exc)
+        return set()
+
+
+def matching_providers(conn, host: str, names: set[str]) -> list:
+    """Providers for this host: by the names Nova gave, else by hostname.
+
+    The fallback covers a re-run after Nova has forgotten the host, where
+    compute-042 can only be recognised as compute-042.<domain>.
+    """
+    providers = list(conn.placement.resource_providers())
+    wanted = names | {host}
+    return ([p for p in providers if p.name in wanted]
+            or [p for p in providers if p.name.startswith(f"{host}.")])
+
+
+def delete_resource_provider(conn, host: str, names: set[str], execute: bool,
+                             assume_yes: bool) -> list[dict]:
     """Placement. This is the one that gets forgotten by hand."""
     rows = []
     try:
-        providers = [p for p in conn.placement.resource_providers() if p.name == host]
+        providers = matching_providers(conn, host, names)
     except Exception as exc:  # noqa: BLE001
         return [row("placement", "FAILED", host, f"could not list resource providers: {exc}")]
+
+    guessed = [p.name for p in providers if p.name not in names | {host}]
+    if len(guessed) > 1:
+        return [row("placement", "FAILED", host,
+                    f"ambiguous, matches {', '.join(sorted(guessed))}; "
+                    "re-run with --host set to the full name and --stage placement")]
 
     if not providers:
         return [row("placement", "OK", host, "no resource provider found")]
 
     for provider in providers:
-        detail = f"resource provider {provider.id}"
+        detail = f"resource provider {provider.name} ({provider.id})"
         if not execute:
             rows.append(row("placement", "WOULD_DELETE", provider.name, detail))
             continue
-        if not confirm(f"Delete Placement resource provider for {host}?", assume_yes):
+        if not confirm(f"Delete Placement resource provider {provider.name}?", assume_yes):
             rows.append(row("placement", "SKIPPED", provider.name, detail))
             continue
         try:
@@ -161,7 +194,7 @@ def delete_resource_provider(conn, host: str, execute: bool, assume_yes: bool) -
     return rows
 
 
-def final_verification(conn, host: str) -> list[dict]:
+def final_verification(conn, host: str, names: set[str]) -> list[dict]:
     rows = []
     remaining = []
 
@@ -173,7 +206,7 @@ def final_verification(conn, host: str) -> list[dict]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        if any(p.name == host for p in conn.placement.resource_providers()):
+        if matching_providers(conn, host, names):
             remaining.append("placement resource provider")
     except Exception:  # noqa: BLE001
         pass
@@ -216,6 +249,7 @@ def main() -> int:
         LOG.info("--dry-run overrides --execute; reporting only")
 
     rows: list[dict] = []
+    names = provider_names(conn, args.host)
 
     if "verify" in stages:
         drained, verify_rows = verify_drained(conn, args.host)
@@ -236,10 +270,10 @@ def main() -> int:
     if "neutron" in stages:
         rows.extend(delete_network_agents(conn, args.host, execute, args.yes))
     if "placement" in stages:
-        rows.extend(delete_resource_provider(conn, args.host, execute, args.yes))
+        rows.extend(delete_resource_provider(conn, args.host, names, execute, args.yes))
 
     if execute:
-        rows.extend(final_verification(conn, args.host))
+        rows.extend(final_verification(conn, args.host, names))
 
     render(rows, COLUMNS, args.format)
 

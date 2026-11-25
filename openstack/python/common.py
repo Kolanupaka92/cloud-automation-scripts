@@ -207,6 +207,17 @@ def host_capacity(conn, hypervisors, capacity=None) -> dict[str, dict[str, float
     return result
 
 
+def service_host(hypervisor) -> str:
+    """The Nova service host behind a hypervisor.
+
+    hypervisor.name is the hypervisor_hostname, usually an FQDN and also the
+    name of the Placement provider. Services, aggregates and --host arguments
+    use the service host, usually the short name.
+    """
+    details = getattr(hypervisor, "service_details", None) or {}
+    return details.get("host") or hypervisor.name
+
+
 def pct(used: float, total: float) -> float:
     """Percentage that tolerates a zero denominator (empty/erroring hosts)."""
     return round((used / total) * 100, 1) if total else 0.0

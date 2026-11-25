@@ -53,9 +53,9 @@ The playbook runs five stages:
 2. **Snapshot.** Written to `reports/<change>-<rack>-pre.json`. This is the bit
    that stops pre-existing hardware findings getting blamed on the maintenance.
 3. **Shutdown.** Cordon (evacuating tenant workloads), then power off, one
-   machine at a time. Rack headroom is re-checked immediately before each
-   power-off, not just once at the start, because the fleet can change during a
-   long window.
+   machine at a time. Rack headroom is checked before each cordon and again
+   before each power-off, because the fleet can change during a long window. A
+   machine blocked after its cordon is uncordoned again.
 4. **Restore.** Power on, wait Ready, uncordon, verify. Every transition is
    polled, never assumed.
 5. **Post-flight.** Re-run the checks and diff against the snapshot.

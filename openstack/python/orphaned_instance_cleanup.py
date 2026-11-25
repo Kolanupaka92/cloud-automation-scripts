@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reconcile Nova against libvirt on a compute node.
 
-Three things turn up, and they are not the same problem:
+Four things turn up, and they are not the same problem:
 
     ORPHAN_DOMAIN       libvirt is running something Nova has no record of, or
                         recorded as deleted. Eats capacity the scheduler
@@ -9,9 +9,14 @@ Three things turn up, and they are not the same problem:
     MISSING_DOMAIN      Nova says ACTIVE, no domain exists. The VM is gone and
                         nothing has noticed.
     STALE_INSTANCE_DIR  leftover directory under /var/lib/nova/instances.
+    UNCONFIRMED         a domain whose instance lives on another host (a live
+                        migration in flight, an unconfirmed resize) or that
+                        Nova could not be asked about.
 
-Cleanup is opt-in per class. MISSING_DOMAIN is never cleaned up; it needs a
-person.
+A host is not an authority on what is an orphan: every candidate is looked up
+across the region, and again immediately before it is removed. Cleanup is
+opt-in per class. MISSING_DOMAIN and UNCONFIRMED are never cleaned up; they
+need a person.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 
-from common import LOG, base_parser, confirm, connect, render, setup_logging
+from common import LOG, base_parser, confirm, connect, os_exceptions, render, setup_logging
 
 COLUMNS = ("finding", "host", "identifier", "name", "nova_state", "libvirt_state", "detail")
 
@@ -96,6 +101,26 @@ def nova_instances(conn, host: str) -> dict[str, object]:
     return active
 
 
+def region_state(conn, uuid: str) -> tuple[str, str]:
+    """What Nova knows about an instance anywhere in the region.
+
+    Returns ("gone" | "live" | "unknown", detail). Only "gone" makes a leftover
+    safe to remove. During a live migration or an unconfirmed resize, both hosts
+    hold a domain and a directory while Nova names only one of them. With
+    shared instance storage every host sees every directory.
+    """
+    try:
+        server = conn.compute.get_server(uuid)
+    except os_exceptions.NotFoundException:
+        return "gone", "no such instance"
+    except Exception as exc:  # noqa: BLE001 - no answer is not a "no"
+        return "unknown", f"Nova lookup failed: {exc}"
+    if (server.status or "").upper() == "DELETED":
+        return "gone", "deleted"
+    return "live", (f"instance is {server.status} on {server.compute_host or 'no host'}"
+                    + (f", task_state={server.task_state}" if server.task_state else ""))
+
+
 def reconcile(conn, host: str, user: str) -> list[dict]:
     domains = libvirt_domains(host, user)
     if domains is None:
@@ -117,6 +142,18 @@ def reconcile(conn, host: str, user: str) -> list[dict]:
     for uuid, domain in domain_uuids.items():
         server = instances.get(uuid)
         if server is None:
+            found, why = region_state(conn, uuid)
+            if found != "gone":
+                rows.append({
+                    "finding": "UNCONFIRMED",
+                    "host": host,
+                    "identifier": uuid,
+                    "name": domain,
+                    "nova_state": found,
+                    "libvirt_state": domains[domain],
+                    "detail": why,
+                })
+                continue
             rows.append({
                 "finding": "ORPHAN_DOMAIN",
                 "host": host,
@@ -161,6 +198,11 @@ def reconcile(conn, host: str, user: str) -> list[dict]:
             continue
         if directory in domain_uuids:
             continue
+        if directory not in instances:
+            found, why = region_state(conn, directory)
+            if found != "gone":
+                LOG.info("leaving %s/%s on %s alone: %s", INSTANCE_DIR, directory, host, why)
+                continue
         rows.append({
             "finding": "STALE_INSTANCE_DIR",
             "host": host,
@@ -179,9 +221,9 @@ def disk_usage(host: str, user: str, uuid: str) -> str:
     return out.split()[0] if rc == 0 and out.split() else "unknown"
 
 
-def clean(rows: list[dict], user: str, target: str, dry_run: bool, assume_yes: bool) -> int:
-    """Remove one class of finding. Never touches MISSING_DOMAIN; that is a
-    tenant-visible outage needing investigation, not cleanup."""
+def clean(conn, rows: list[dict], user: str, target: str, dry_run: bool, assume_yes: bool) -> int:
+    """Remove one class of finding. Never touches MISSING_DOMAIN, which is a
+    tenant-visible outage needing investigation, or UNCONFIRMED."""
     if target == "orphan-domains":
         selected = [r for r in rows if r["finding"] == "ORPHAN_DOMAIN"]
         action = "destroy and undefine libvirt domain"
@@ -207,6 +249,12 @@ def clean(rows: list[dict], user: str, target: str, dry_run: bool, assume_yes: b
     failures = 0
     for row in selected:
         host = row["host"]
+        # The report may be minutes old by the time someone answers the prompt.
+        found, why = region_state(conn, row["identifier"])
+        if found != "gone":
+            failures += 1
+            LOG.error("not touching %s on %s: %s", row["identifier"], host, why)
+            continue
         if target == "orphan-domains":
             domain = shlex.quote(row["_domain"])
             rc_destroy, _ = ssh(host, f"virsh destroy {domain}", user)
@@ -295,7 +343,7 @@ def main() -> int:
             )
 
     if args.clean:
-        return clean(rows, args.ssh_user, args.clean, args.dry_run, args.yes)
+        return clean(conn, rows, args.ssh_user, args.clean, args.dry_run, args.yes)
     return 0
 
 

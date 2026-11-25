@@ -215,10 +215,10 @@ with DAG(
                 capture_output=True, text=True, timeout=900,
             )
             rows = json.loads(result.stdout or "[]")
-            match = next((r for r in rows if r["hypervisor"] == host), None)
+            match = next((r for r in rows if r["_host"] == host), None)
             if match is None:
                 raise RuntimeError(f"{host} is not reporting to the scheduler after maintenance")
-            if not str(match.get("state", "")).startswith("up"):
+            if match.get("state") != "up/enabled":
                 raise RuntimeError(f"{host} is back but reports state {match.get('state')}")
 
             print(f"{host} back in service: {match['vcpu_total']} vCPU, "
