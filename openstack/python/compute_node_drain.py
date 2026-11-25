@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Drain a compute node before maintenance.
 
 Checks there is somewhere for the instances to go, disables nova-compute with
@@ -22,6 +23,7 @@ from common import (
     connect,
     host_capacity,
     render,
+    service_host,
     setup_logging,
 )
 
@@ -87,7 +89,7 @@ def capacity_available(conn, host: str, rows: list[dict]) -> bool:
     # drain the region cannot actually absorb.
     hypervisors = [
         hv for hv in conn.compute.hypervisors(details=True)
-        if hv.name != host and hv.state == "up" and hv.status == "enabled"
+        if service_host(hv) != host and hv.state == "up" and hv.status == "enabled"
     ]
     capacity = host_capacity(conn, hypervisors)
     free_vcpu = sum(entry["vcpu_free"] for entry in capacity.values())

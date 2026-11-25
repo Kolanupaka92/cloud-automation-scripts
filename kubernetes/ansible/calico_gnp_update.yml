@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Safely update Calico GlobalNetworkPolicy (GNP) and NetworkPolicy objects.
 #
 #   ansible-playbook calico_gnp_update.yml -e policy_dir=policies/prod --check --diff

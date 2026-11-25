@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Find (and optionally delete) unowned resources in a region.
 
 Covers available volumes, snapshots whose source volume is gone, unassociated
@@ -139,16 +140,24 @@ def find_ports(conn, min_age: int) -> list[dict]:
 
 
 def find_images(conn, min_age: int) -> list[dict]:
-    in_use = {
-        srv.image.get("id")
-        for srv in conn.compute.servers(all_projects=True, details=True)
-        if isinstance(srv.image, dict) and srv.image.get("id")
-    }
+    in_use = set()
+    shelved_ids, shelve_names = set(), set()
+    for srv in conn.compute.servers(all_projects=True, details=True):
+        if isinstance(srv.image, dict) and srv.image.get("id"):
+            in_use.add(srv.image["id"])
+        # A shelved instance's only disk is a snapshot image, which Nova does
+        # not expose on the server. Glance records which instance it is of;
+        # Nova names it <instance>-shelved.
+        if (srv.status or "").upper().startswith("SHELVED"):
+            shelved_ids.add(srv.id)
+            shelve_names.add(f"{srv.name}-shelved")
     rows = []
     for image in conn.image.images():
         if image.visibility != "private" or image.id in in_use:
             continue
-        if image.protected or not older_than(image.created_at, min_age):
+        if image.instance_uuid in shelved_ids or image.name in shelve_names:
+            continue
+        if image.is_protected or not older_than(image.created_at, min_age):
             continue
         rows.append(
             {

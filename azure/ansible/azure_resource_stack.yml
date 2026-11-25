@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Create a complete, policy-compliant Azure application stack from one spec:
 # resource group, network, storage, key vault, and VMs.
 #

@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Provision a standard Linux VM in Azure with the baseline every workload is
 # expected to carry: managed identity, no public IP, an NSG with no inbound
 # admin exposure, boot diagnostics, encryption at host, and Azure Monitor.

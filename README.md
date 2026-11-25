@@ -37,9 +37,9 @@ common/ansible/roles  shared roles
 | `orphaned_instance_cleanup.py` | Nova vs libvirt reconciliation. Catches domains eating untracked capacity, and instances Nova thinks are running that aren't. |
 | `numa_topology_audit.py` | Pinning, isolcpus, hugepage balance, NIC locality. None of it alerts; all of it costs latency. |
 | `security_group_audit.py` | Ingress exposure ranked by severity. Can gate a pipeline. |
-| `upgrade_preflight.py` | The gate before a window. Services, version skew, stuck instances and volumes, quota, capacity to drain N hosts. |
+| `upgrade_preflight.py` | The gate before a window. Services, hypervisor version skew, stuck instances and volumes, quota, capacity to drain N hosts. |
 | `network_onboarding.py` | Networks from a YAML spec, validated against the region before anything is created. |
-| `vmware_to_openstack_migrate.py` | Per-VM migration in resumable phases, preserving MAC and IP. |
+| `vmware_to_openstack_migrate.py` | Per-VM cold migration in resumable phases, preserving MAC and IP. The source is shut down before export. |
 | `prometheus_exporter.py` | Cloud-level metrics the node exporters don't cover. |
 
 | | |

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """NUMA, CPU pinning and hugepage audit for compute nodes.
 
 Catches the things that never alert but cost 20-30% on latency-sensitive

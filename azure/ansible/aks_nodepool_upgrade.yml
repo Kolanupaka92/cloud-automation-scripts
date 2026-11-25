@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Controlled AKS node pool upgrade: check readiness, cordon-and-surge one pool
 # at a time, verify workloads, then move on. System pools go last so the
 # control-plane add-ons keep a stable home while user pools cycle.

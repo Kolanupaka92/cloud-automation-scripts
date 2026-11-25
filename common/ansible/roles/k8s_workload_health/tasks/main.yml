@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Read-only Kubernetes health assessment. Never restarts or deletes anything.
 # Recovery lives in the dedicated restart playbooks so this stays safe to run
 # during an active incident.

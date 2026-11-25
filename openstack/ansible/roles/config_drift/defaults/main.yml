@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Files whose content must match the checked-in baseline exactly.
 # Checksums are compared, not contents, so nothing sensitive leaves the host.
 drift_tracked_files:

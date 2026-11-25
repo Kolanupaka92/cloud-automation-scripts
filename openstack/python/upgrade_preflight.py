@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Pre-upgrade checks for a region. Run before every window.
 
-Covers service and agent liveness, nova-compute version skew, instances and
+Covers service and agent liveness, hypervisor version skew, instances and
 volumes stuck mid-transition, migrations left in flight, projects near a quota
 limit, and whether there is capacity to drain --evacuate-hosts at once.
+
+Nova release skew is not covered: the API does not expose service versions.
+Run `nova-status upgrade check` on a controller for that.
 
 Exit 0 clean, 1 warnings, 2 blocking.
 """
@@ -28,7 +32,9 @@ COLUMNS = ("status", "check", "subject", "detail")
 
 STABLE_VM_STATES = {"active", "stopped", "shelved", "shelved_offloaded", "paused", "suspended"}
 STABLE_VOLUME_STATES = {"available", "in-use", "reserved"}
-TERMINAL_MIGRATION_STATES = {"completed", "done", "cancelled", "error", "failed"}
+# "finished" is deliberately absent: it is a resize still waiting to be confirmed.
+TERMINAL_MIGRATION_STATES = {"completed", "done", "cancelled", "error", "failed",
+                             "confirmed", "reverted"}
 
 
 def ok(check: str, subject: str, detail: str) -> dict:
@@ -73,15 +79,34 @@ def check_services(conn) -> list[dict]:
 
 
 def check_version_skew(conn) -> list[dict]:
-    versions = Counter()
-    for svc in conn.compute.services():
-        if svc.binary == "nova-compute":
-            versions[getattr(svc, "version", None)] += 1
-    if len(versions) <= 1:
-        only = next(iter(versions), "unknown")
-        return [ok("version-skew", "nova-compute", f"all {versions[only]} nodes on version {only}")]
-    detail = ", ".join(f"v{ver}: {count} node(s)" for ver, count in sorted(versions.items(), key=str))
-    return [fail("version-skew", "nova-compute", f"mixed service versions ({detail})")]
+    """Hypervisor versions, per type.
+
+    This is libvirt/QEMU, not Nova: os-services has no version field. It still
+    matters for a drain, since live migration to an older hypervisor fails.
+    """
+    versions: dict[str, Counter] = {}
+    unknown = 0
+    for hv in conn.compute.hypervisors(details=True):
+        if hv.hypervisor_version is None:
+            unknown += 1
+            continue
+        kind = hv.hypervisor_type or "unknown"
+        versions.setdefault(kind, Counter())[hv.hypervisor_version] += 1
+
+    rows = []
+    for kind, counts in sorted(versions.items()):
+        if len(counts) > 1:
+            detail = ", ".join(f"v{ver}: {n} node(s)"
+                               for ver, n in sorted(counts.items(), key=str))
+            rows.append(fail("version-skew", kind, f"mixed hypervisor versions ({detail})"))
+        else:
+            version, n = next(iter(counts.items()))
+            rows.append(ok("version-skew", kind, f"all {n} node(s) on hypervisor v{version}; "
+                                                 "Nova release skew is not checked"))
+    if unknown or not rows:
+        rows.append(warn("version-skew", "nova",
+                         f"hypervisor version not reported by {unknown} node(s), not checked"))
+    return rows
 
 
 def check_stuck_instances(conn) -> list[dict]:

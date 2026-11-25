@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Sai Kolanupaka
 """Quarterly maintenance driver for Nexus bare metal machines.
 
 cordon -> power off -> (hardware work) -> power on -> wait Ready -> uncordon
@@ -9,8 +10,8 @@ interrupted window resumes with --resume rather than starting again.
     ./nexus_bmm_maintenance.py --rack rack-03 --change CHG0041827 --phase shutdown
     ./nexus_bmm_maintenance.py --rack rack-03 --change CHG0041827 --phase restore
 
-Rack headroom is re-checked immediately before every power-off, not just once
-at the start. --phase shutdown/restore splits the run around the hardware
+Rack headroom is checked before each machine is cordoned and again immediately
+before its power-off, not just once at the start. --phase shutdown/restore splits the run around the hardware
 team's window.
 
 Does not replace or reimage a machine. Those stay manual.
@@ -18,6 +19,7 @@ Does not replace or reimage a machine. Those stay manual.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from datetime import datetime, timezone
@@ -83,6 +85,12 @@ class MaintenanceState:
         })
         self.flush()
 
+    def reopen(self, machine: str, step: str) -> None:
+        """Forget a completed step that has been undone, so a resume repeats it."""
+        entry = self.data["machines"].get(machine, {"completed": []})
+        if step in entry["completed"]:
+            entry["completed"].remove(step)
+
     def flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, indent=2))
@@ -111,29 +119,47 @@ def wait_for(nc, resource_group: str, name: str, predicate, description: str,
     return False
 
 
-def rack_has_headroom(nc, args, target_machine_name: str) -> bool:
-    """Re-check, immediately before power-off, that the rack can spare a machine."""
-    peers = list_machines(nc, args)
-    target_rack = None
-    for machine in peers:
-        if machine_name(machine) == target_machine_name:
-            target_rack = rack_name(machine)
-            break
-    if target_rack is None:
+def rack_id(machine) -> str:
+    return text(prop(machine, "rack_id")).rstrip("/").lower()
+
+
+def rack_has_headroom(nc, args, target) -> bool:
+    """Can the target's rack spare it right now?
+
+    Looks at the whole rack: --machine and --rack choose what to work on, not
+    what counts as a peer.
+    """
+    scope = copy.copy(args)
+    scope.machine = None
+    scope.rack = None
+    in_rack = [m for m in list_machines(nc, scope) if rack_id(m) == rack_id(target)]
+    if not any(m.id == target.id for m in in_rack):
+        LOG.error("    %s is no longer listed in rack %s", machine_name(target), rack_name(target))
         return False
 
-    in_rack = [m for m in peers if rack_name(m) == target_rack]
-    healthy_others = [
-        m for m in in_rack
-        if machine_name(m) != target_machine_name and not health_summary(m)
-    ]
+    healthy_others = [m for m in in_rack if m.id != target.id and not health_summary(m)]
     ok = len(healthy_others) >= args.min_healthy_per_rack
     if not ok:
         LOG.error(
             "    rack %s would drop to %d healthy machine(s), below the floor of %d",
-            target_rack, len(healthy_others), args.min_healthy_per_rack,
+            rack_name(target), len(healthy_others), args.min_healthy_per_rack,
         )
     return ok
+
+
+def release(nc, rg, name, args, state) -> None:
+    """Undo a cordon this run made, when the machine is not going down after all."""
+    LOG.info("  %s: returning to service, it will not be powered off", name)
+    try:
+        ok = do_uncordon(nc, rg, name, args)
+    except HttpResponseError as exc:
+        LOG.error("    uncordon failed: %s", exc.message or exc)
+        ok = False
+    if ok:
+        state.reopen(name, "cordon")
+    else:
+        LOG.error("  %s is still cordoned; uncordon it by hand", name)
+    state.record(name, "release", "done" if ok else "failed")
 
 
 def do_cordon(nc, rg, name, args, evacuate: bool) -> bool:
@@ -233,6 +259,7 @@ def maintain_machine(nc, machine, args, state: MaintenanceState) -> dict:
                  name, row["rack"], row["slot"], tenant_vms, " -> ".join(phases))
         return row
 
+    cordoned_here = False
     for step in phases:
         if state.completed(name, step):
             LOG.info("  %s: %s already completed, skipping", name, step)
@@ -242,13 +269,18 @@ def maintain_machine(nc, machine, args, state: MaintenanceState) -> dict:
         LOG.info("  %s: %s", name, step)
 
         try:
+            # Before the cordon, which evacuates tenants, and again before the
+            # power-off, since a peer may have failed during the evacuation.
+            if step in ("cordon", "power_off") and not rack_has_headroom(nc, args, machine):
+                state.record(name, step, "blocked-no-headroom")
+                row["result"] = "blocked: rack headroom"
+                if cordoned_here:
+                    release(nc, rg, name, args, state)
+                return row
+
             if step == "cordon":
                 ok = do_cordon(nc, rg, name, args, evacuate=(tenant_vms > 0 and not args.no_evacuate))
             elif step == "power_off":
-                if not rack_has_headroom(nc, args, name):
-                    state.record(name, step, "blocked-no-headroom")
-                    row["result"] = "blocked: rack headroom"
-                    return row
                 ok = do_power_off(nc, rg, name, args)
             elif step == "power_on":
                 ok = do_power_on(nc, rg, name, args)
@@ -268,6 +300,10 @@ def maintain_machine(nc, machine, args, state: MaintenanceState) -> dict:
         if not ok:
             row["result"] = f"failed at {step}"
             return row
+
+        # Someone else's cordon, from before the window, is not ours to lift.
+        if step == "cordon":
+            cordoned_here = row["cordon"] == "Uncordoned"
 
         if step == "power_off" and args.hold_seconds:
             LOG.info("  %s: holding powered off for %ds (hardware work window)",

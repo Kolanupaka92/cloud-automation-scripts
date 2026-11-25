@@ -1,4 +1,5 @@
 ---
+# Author: Sai Kolanupaka
 # Validate and (optionally) remediate server firmware against an approved baseline.
 #
 #   ansible-playbook firmware_validate.yml                          # report only
